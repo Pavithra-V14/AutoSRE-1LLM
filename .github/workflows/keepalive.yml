@@ -1,0 +1,13 @@
+name: Keep Free Tier Services Warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping simulator health endpoint
+        run: curl -sf "${{ secrets.SIMULATOR_BASE_URL }}/health" || true

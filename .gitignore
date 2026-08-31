@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+
+# Node / Next.js dashboard
+node_modules/
+.next/
+dashboard/node_modules/
+dashboard/.next/
+
+.DS_Store
+IDEA.md

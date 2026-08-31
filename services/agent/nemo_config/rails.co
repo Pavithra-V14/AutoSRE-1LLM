@@ -1,0 +1,9 @@
+flow check incident alert scope
+  """
+  Blocks incident alert text that attempts to steer the agent off-task
+  (prompt injection) rather than describe an actual production incident.
+  """
+  $result = await CheckAlertScopeAction
+  if $result.is_suspicious
+    bot refuse to respond
+    abort

@@ -1,0 +1,44 @@
+name: Incident Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start simulator and control API
+        run: |
+          nohup uvicorn services.simulator.main:app --port 8000 > sim.log 2>&1 &
+          nohup uvicorn services.api.main:app --port 8001 > api.log 2>&1 &
+          sleep 3
+          curl -sf http://localhost:8000/health
+          curl -sf http://localhost:8001/health
+
+      - name: Test guardrails (Item 8 -- adversarial injection/PII cases)
+        run: python tools/test_guardrails.py
+
+      - name: Test control API endpoints
+        run: python tests/test_control_api.py
+
+      - name: Run scenario benchmark
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python tools/run_benchmark.py --min-success-rate 0.5

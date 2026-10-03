@@ -7,7 +7,7 @@ import httpx
 
 from services.agent.logging_utils import log_stage
 
-SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8000")
+SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8100")
 _token_cache: dict[tuple[str, str], str] = {}
 
 

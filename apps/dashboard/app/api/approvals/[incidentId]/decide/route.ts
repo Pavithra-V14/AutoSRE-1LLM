@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 // route attaches the real secret when calling the control API. This is
 // the actual security boundary: a write-capable credential must never
 // live in client-side JavaScript, no matter how "internal" the tool is.
-const CONTROL_API_URL = process.env.CONTROL_API_URL || process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8001";
+const CONTROL_API_URL = process.env.CONTROL_API_URL || process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8101";
 const CONTROL_API_KEY = process.env.CONTROL_API_KEY;
 
 export async function POST(

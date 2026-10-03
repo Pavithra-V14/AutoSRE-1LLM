@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 // This route exists specifically so the Danger Zone button on /status
 // can call something without the page itself holding a write-capable
 // secret.
-const CONTROL_API_URL = process.env.CONTROL_API_URL || process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8001";
+const CONTROL_API_URL = process.env.CONTROL_API_URL || process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8101";
 const CONTROL_API_KEY = process.env.CONTROL_API_KEY;
 
 export async function POST(request: NextRequest) {

@@ -1,4 +1,4 @@
-const CONTROL_API_URL = process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8001";
+const CONTROL_API_URL = process.env.NEXT_PUBLIC_CONTROL_API_URL || "http://localhost:8101";
 const FETCH_TIMEOUT_MS = 15_000; 
 
 async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {

@@ -22,11 +22,14 @@ jobs:
 
       - name: Start simulator and control API
         run: |
-          nohup uvicorn services.simulator.main:app --port 8000 > sim.log 2>&1 &
-          nohup uvicorn services.api.main:app --port 8001 > api.log 2>&1 &
+          nohup uvicorn services.simulator.main:app --port 8100 > sim.log 2>&1 &
+          nohup uvicorn services.api.main:app --port 8101 > api.log 2>&1 &
           sleep 3
-          curl -sf http://localhost:8000/health
-          curl -sf http://localhost:8001/health
+          curl -sf http://localhost:8100/health
+          curl -sf http://localhost:8101/health
+
+      - name: Unit tests (offline -- JSON repair, dedupe, scoring, guardrails)
+        run: python -m pytest tests -q --ignore=tests/test_control_api.py
 
       - name: Test guardrails (Item 8 -- adversarial injection/PII cases)
         run: python tools/test_guardrails.py

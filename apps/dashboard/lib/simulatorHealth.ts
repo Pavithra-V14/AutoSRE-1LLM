@@ -1,4 +1,4 @@
-const SIMULATOR_URL = process.env.NEXT_PUBLIC_SIMULATOR_URL || "http://localhost:8000";
+const SIMULATOR_URL = process.env.NEXT_PUBLIC_SIMULATOR_URL || "http://localhost:8100";
 const TIMEOUT_MS = 5_000;
 
 export async function fetchSimulatorHealth(): Promise<{ status: string } | null> {

@@ -18,7 +18,7 @@ from services.agent.tokens import TokenIssuanceError, get_or_issue_token
 load_dotenv()
 
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
-SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8000")
+SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8100")
 
 
 def _format_slack_message(

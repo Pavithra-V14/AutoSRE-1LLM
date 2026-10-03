@@ -121,3 +121,53 @@ def test_seed_cases_cover_the_scenario_shapes_the_benchmark_has():
     ids = {c["id"] for c in load_cases(LABELS)}
     assert {"blames-the-decoy", "echoes-injection", "two-causes-one-found", "two-causes-both-found",
             "pool-different-vocabulary"} <= ids
+
+
+# --- waiting out rate limits ------------------------------------------------------------------------------------------
+
+class FlakyJudge:
+    """Fails with a rate limit `failures` times, then grades correctly."""
+    def __init__(self, failures):
+        self.failures, self.calls = failures, 0
+
+    def evaluate(self, *, ground_truth, graph):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError("429 rate limit")
+        return JudgeVerdict("correct", 1.0, "r", "groq", 1, 1)
+
+
+def test_a_rate_limited_case_waits_and_is_retried():
+    slept = []
+    judge = FlakyJudge(failures=2)
+    report = evaluate_judge(judge, [_case("c", "correct")], retries=3, wait_for=lambda: 30.0, sleep=slept.append)
+
+    assert report.unscored == 0 and report.agreement == 1.0
+    assert slept == [30.0, 30.0] and judge.calls == 3
+
+
+def test_retries_are_bounded():
+    judge = FlakyJudge(failures=99)
+    report = evaluate_judge(judge, [_case("c", "correct")], retries=2, wait_for=lambda: 5.0, sleep=lambda s: None)
+    assert report.unscored == 1 and judge.calls == 3  # first try + 2 retries
+
+
+def test_a_wait_longer_than_the_cap_gives_up_immediately():
+    """A daily cap will not lift this session -- do not sleep for hours."""
+    slept = []
+    judge = FlakyJudge(failures=99)
+    report = evaluate_judge(judge, [_case("c", "correct")], retries=3, wait_for=lambda: 7200.0,
+                            max_wait_seconds=120.0, sleep=slept.append)
+    assert report.unscored == 1 and slept == [] and judge.calls == 1
+
+
+def test_no_wait_configured_means_the_old_fail_fast_behaviour():
+    judge = FlakyJudge(failures=1)
+    report = evaluate_judge(judge, [_case("c", "correct")])
+    assert report.unscored == 1 and judge.calls == 1
+
+
+def test_zero_wait_does_not_loop_forever():
+    judge = FlakyJudge(failures=99)
+    report = evaluate_judge(judge, [_case("c", "correct")], retries=5, wait_for=lambda: 0.0, sleep=lambda s: None)
+    assert report.unscored == 1 and judge.calls == 1

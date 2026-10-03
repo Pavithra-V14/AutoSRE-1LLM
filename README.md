@@ -205,11 +205,111 @@ trigger kind + first effect (`deploy/pool_exhaustion`), so two different deploys
 causing the same failure build up one trust history instead of two. Trust events
 recorded under the old free-text keys are not migrated.
 
+### What the agent is shown
+
+Beyond the raw tool output, each prompt carries (all computed in code, in
+`services/agent/context.py`):
+
+- **Derived signals** -- when each metric left its baseline, whether a spike was
+  a one-point blip, how long after a deploy the first error appeared, and whether
+  errors *predate* a deploy (so it cannot be the cause).
+- **Service dependencies** from `services/agent/topology.json` (override with
+  `TOPOLOGY_PATH`), labelled as background, not evidence.
+- **The current time** in the same format as tool timestamps, so `since` is valid.
+- A **compact trace**: repeated log lines collapsed, long strings clipped, step
+  numbers preserved for citations.
+
+The synthesis also states a **`recommended_action`** (`none`, `restart_service`,
+`rollback_deploy`). It is advice routed through the approval flow, never an
+execution, and it is withheld when confidence was capped (a required signal was
+missing, or tool output looked like an injection), when a rollback's root cause is
+not a deploy/config/flag change, or when no deploy history was read.
+
+Optional routing: `PLANNER_PROVIDER` / `SYNTHESIS_PROVIDER` choose a provider per
+stage, and `SYNTHESIS_ESCALATION_PROVIDER` re-asks once on a stronger provider when
+the first synthesis comes back unsure.
+
+### Offline benchmark (record and replay)
+
+A live run needs API quota and is not repeatable. Recorded LLM responses make the
+benchmark free and deterministic:
+
+```bash
+# once, live -- writes tests/fixtures/llm_replay/*.json
+LLM_REPLAY_MODE=record uv run python tools/run_benchmark.py --smoke
+
+# anywhere, no API keys: reproduces the recorded run exactly
+LLM_REPLAY_MODE=replay uv run python tools/run_benchmark.py --smoke
+```
+
+Requests are matched on the *normalized* prompt (timestamps and ids masked), so a
+recording made in one process matches a replay in another. **Any prompt change
+invalidates the fixtures**: replay then fails with `ReplayMiss`, naming the request,
+and you re-record. Replay verifies the harness and the code around the model; a new
+prompt still needs a live run.
+
+### Regression gating
+
+```bash
+uv run python tools/run_benchmark.py --runs 3 --save-baseline benchmarks/baseline.json   # once you trust the numbers
+uv run python tools/run_benchmark.py --runs 3 --baseline benchmarks/baseline.json        # exit 1 on regression
+```
+
+A scenario regresses when its pass rate falls more than `--max-drop` (default 0.34:
+one flaky failure in three runs is noise, two is not) below the baseline. Overall,
+it regresses only when the current success-rate interval lies entirely below the
+baseline's, over the scenarios present in both runs.
+
+### Judge calibration
+
+```bash
+uv run python tools/calibrate_judge.py --min-agreement 0.7
+```
+
+Scores the judge against labelled cases: agreement, Cohen's kappa, a confusion
+matrix, and whether it errs lenient or harsh. `benchmarks/judge_labels.json` is a
+**developer-written seed set** -- replace and extend it with labels from independent
+reviewers of real runs before trusting the numbers. The tool waits out free-tier
+rate limits (`--max-wait`) and excludes any case it could not grade, saying so.
+
+### Rate limits and providers
+
+The router reads the provider's own "try again in 2m3s" and cools that provider down
+for exactly that long (instead of a blind exponential guess). `LLM_PROVIDER_ORDER`
+(e.g. `groq,gemini`) leaves out providers you do not want, such as OpenRouter's free
+routed models. Groq synthesis/judge calls use strict JSON-schema decoding
+(`LLM_STRUCTURED_OUTPUT=false` to disable); a provider that rejects a schema falls
+back to plain JSON mode.
+
+### Tracing
+
+`AUTOSRE_TRACING=console` (or `otlp` with the standard `OTEL_EXPORTER_OTLP_*`
+variables) emits one trace per incident with a span per agent step and LLM call.
+Spans carry tool names, statuses, token counts, latencies and confidence -- never
+prompts, tool output, alert text or log lines. Off by default.
+
+### CI
+
+| Job | When | What |
+|---|---|---|
+| `unit` | every push / PR | the offline test suite and guardrail cases; no secrets |
+| `replay-smoke` | every push / PR | the smoke subset replayed from recordings; must pass 100% (replay is deterministic, so any failure is a code regression) |
+| `nightly` | schedule / manual | live benchmark, 3 runs per scenario, compared to `benchmarks/baseline.json`, plus judge calibration |
+
+### Database
+
+`infra/db/migrations/002_benchmark_scoring.sql` adds the judge's verdict columns to
+`benchmark_runs`; until it is applied, inserts fall back to pass/fail only. The backend
+should use the Supabase **service_role** key -- it logs a warning when it is given the
+public anon key, and `SUPABASE_REQUIRE_SERVICE_ROLE=true` makes that an error.
+
 ### Unit tests (offline)
 
 ```bash
 uv run python -m pytest tests -q --ignore=tests/test_control_api.py
 ```
+
+Tests never reach a live LLM: an autouse fixture strips provider API keys and resets the router's cooldown state for every test.
 
 ## License
 

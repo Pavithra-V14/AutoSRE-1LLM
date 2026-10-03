@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -50,9 +52,51 @@ def compute_equivalent_cost_usd(provider: str, input_tokens: int, output_tokens:
         (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate, 6
     )
 
+def key_role(key: Optional[str]) -> Optional[str]:
+    """The `role` claim of a Supabase JWT key ("anon", "service_role"), or None
+    if `key` is not a JWT. Only DECODES the payload to read a label -- nothing
+    is verified, and the key itself is never logged."""
+    try:
+        payload = (key or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("role")
+    except Exception:
+        return None
+
+
+_warned_anon_key = False
+
+
+def check_backend_key(key: Optional[str]) -> None:
+    """The backend should hold the service_role key, never the public anon key.
+
+    The dashboard ships the anon key to every browser, so a backend running on
+    it has no more access than any visitor -- and if it works at all, the
+    tables are open to anyone who has the dashboard URL. Warns once by
+    default. Set SUPABASE_REQUIRE_SERVICE_ROLE=true in production to refuse to
+    start instead of warning."""
+    global _warned_anon_key
+    role = key_role(key)
+    if role == "service_role":
+        return
+    if os.getenv("SUPABASE_REQUIRE_SERVICE_ROLE", "false").strip().lower() == "true":
+        raise RuntimeError(
+            f"SUPABASE_REQUIRE_SERVICE_ROLE is set but SUPABASE_KEY is not a service_role key (role: {role or 'unknown'}). "
+            "Use the service_role key in the backend .env and keep the anon key for the dashboard only."
+        )
+    if not _warned_anon_key:
+        _warned_anon_key = True
+        print(
+            f"[persistence:warn] SUPABASE_KEY role is '{role or 'unknown'}', not 'service_role'. The backend should use the "
+            "service_role key (Supabase -> Project Settings -> API); the anon key is public in the dashboard. "
+            "Set SUPABASE_REQUIRE_SERVICE_ROLE=true to make this an error."
+        )
+
+
 def _get_client():
     if not (SUPABASE_URL and SUPABASE_KEY):
         return None
+    check_backend_key(SUPABASE_KEY)
     from supabase import ClientOptions, create_client
 
     try:

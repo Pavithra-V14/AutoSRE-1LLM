@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from services.agent import tracing
 from services.agent.benchmark_stats import (
     DEFAULT_MAX_DROP,
     compare_to_baseline,
@@ -135,6 +136,7 @@ def main() -> None:
     if args.runs < 1:
         parser.error("--runs must be at least 1")
     judge = None if args.no_judge else CausalGraphJudge()
+    tracing.configure_tracing()
 
     if args.scenario and args.smoke:
         parser.error("--scenario and --smoke are mutually exclusive")
@@ -310,6 +312,7 @@ def main() -> None:
         )
         failed = True
 
+    tracing.shutdown()
     if failed:
         sys.exit(1)
 

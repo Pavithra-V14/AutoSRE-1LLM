@@ -11,6 +11,10 @@ from services.agent.approval import execute_approved_action, record_decision
 from services.agent.escalation import check_and_escalate
 from services.agent.persistence import get_pending_approvals, get_system_metrics, wipe_all_data
 
+from services.agent import tracing
+
+tracing.configure_tracing()
+
 CONTROL_API_KEY = os.getenv("CONTROL_API_KEY")
 
 if not CONTROL_API_KEY:

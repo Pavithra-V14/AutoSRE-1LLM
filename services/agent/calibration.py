@@ -19,10 +19,11 @@ runs: the more independent the labelling, the more the numbers mean.
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol
 
 from services.agent.judge import VERDICTS
 
@@ -97,17 +98,40 @@ def _graph_from_case(case: dict[str, Any]) -> dict[str, Any]:
     return {"edges": edges, "confidence": 0.8, "confidence_rationale": rationale, "model_rationale": rationale}
 
 
-def evaluate_judge(judge: _Judge, cases: Iterable[dict[str, Any]]) -> CalibrationReport:
+def evaluate_judge(
+    judge: _Judge,
+    cases: Iterable[dict[str, Any]],
+    *,
+    retries: int = 0,
+    wait_for: Optional[Callable[[], float]] = None,
+    max_wait_seconds: float = 120.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> CalibrationReport:
     """Runs the judge over every case. A case the judge cannot grade (provider
     outage, unusable output) is counted as unscored and excluded from the
-    statistics -- never silently treated as a match or a miss."""
+    statistics -- never silently treated as a match or a miss.
+
+    On a free tier the limit is usually a rate window, not an outage: with
+    `retries` and `wait_for` (seconds until a provider is available) a failed
+    case waits for the window to lift -- up to `max_wait_seconds`, so a daily
+    cap that will not lift today still ends the run promptly -- and is retried
+    before being given up on."""
     results: list[CaseResult] = []
     for case in cases:
-        try:
-            verdict = judge.evaluate(ground_truth=case["ground_truth"], graph=_graph_from_case(case)).verdict
-            results.append(CaseResult(case["id"], case["label"], verdict, case.get("note", "")))
-        except Exception as e:
-            results.append(CaseResult(case["id"], case["label"], None, case.get("note", ""), error=str(e)[:120]))
+        attempt = 0
+        while True:
+            try:
+                verdict = judge.evaluate(ground_truth=case["ground_truth"], graph=_graph_from_case(case)).verdict
+                results.append(CaseResult(case["id"], case["label"], verdict, case.get("note", "")))
+                break
+            except Exception as e:
+                wait = wait_for() if wait_for else 0.0
+                if attempt < retries and 0 < wait <= max_wait_seconds:
+                    attempt += 1
+                    sleep(wait)
+                    continue
+                results.append(CaseResult(case["id"], case["label"], None, case.get("note", ""), error=str(e)[:120]))
+                break
 
     scored = [r for r in results if r.verdict is not None]
     human = [r.label for r in scored]

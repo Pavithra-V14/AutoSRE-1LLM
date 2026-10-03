@@ -35,6 +35,7 @@ from services.agent.persistence import (
 )
 from services.agent.schemas import SYNTHESIS_SCHEMA
 from services.agent.structured import StructuredOutputError, StructuredResult, complete_json
+from services.agent import tracing
 from services.agent.tokens import get_or_issue_token
 from services.agent.tools import (
     BLAST_RADIUS,
@@ -371,6 +372,7 @@ def _make_plan_validator(has_evidence: bool):
     return validate
 
 
+@tracing.traced("agent.plan", lambda s: {"done": s["done"], "steps": len(s["steps_taken"])})
 def plan_step(state: IncidentState) -> IncidentState:
     """Ask the LLM: given what we know so far, what's the next tool call
     and its role (required vs preferred) -- or is the evidence already
@@ -546,6 +548,14 @@ def _covering_call_index(steps_taken: list[dict[str, Any]], tool: str, params: d
     return None
 
 
+def _describe_act(state: IncidentState) -> dict[str, Any]:
+    last = state["steps_taken"][-1] if state["steps_taken"] else {}
+    content = last.get("content", {}) if last.get("type") == "observation" else {}
+    return {"tool": content.get("tool"), "status": content.get("status"), "steps": len(state["steps_taken"]),
+            "injection_suspected": bool(content.get("injection_suspected"))}
+
+
+@tracing.traced("agent.act", _describe_act)
 def act_step(state: IncidentState) -> IncidentState:
     if state["done"] or not state["steps_taken"]:
         return state
@@ -814,6 +824,10 @@ def _escalate_if_unsure(state: IncidentState, prompt: str, result: StructuredRes
     return stronger
 
 
+@tracing.traced("agent.synthesize", lambda s: {
+    "confidence": s["confidence"], "needs_approval": s["needs_approval"],
+    "edges": len((s["causal_graph"] or {}).get("edges", [])), "aborted": bool((s["causal_graph"] or {}).get("aborted")),
+})
 def synthesize_step(state: IncidentState) -> IncidentState:
     """Produce the final causal graph, citing tool_call evidence for every
     edge. Unusable output (bad JSON, failed schema validation) is re-asked
@@ -1101,7 +1115,12 @@ def run_incident(
         "synthesis_input_tokens": 0,
         "synthesis_output_tokens": 0,
     }
-    result = app.invoke(initial)
+    with tracing.span("incident", incident_id=incident_id, scenario=scenario or "") as incident_span:
+        result = app.invoke(initial)
+        incident_span.set(
+            steps=len(result.get("steps_taken", [])), confidence=result.get("confidence"),
+            needs_approval=result.get("needs_approval"),
+        )
 
     flush_pending_writes()
 

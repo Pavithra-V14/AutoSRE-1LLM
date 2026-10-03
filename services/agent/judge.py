@@ -111,6 +111,10 @@ class CausalGraphJudge:
         self._router = router or LLMRouter()
         self._prefer = prefer or os.getenv("JUDGE_PROVIDER") or None
 
+    def seconds_until_available(self) -> float:
+        """How long until a provider can take a request (0 = now)."""
+        return self._router.seconds_until_available()
+
     def evaluate(self, *, ground_truth: str, graph: dict[str, Any]) -> JudgeVerdict:
         """Raises ProviderError / StructuredOutputError when no verdict can
         be obtained -- the caller decides the fallback, so a degraded judge

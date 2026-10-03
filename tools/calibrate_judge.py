@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,11 +30,21 @@ def main() -> None:
     parser.add_argument("--labels", default=str(DEFAULT_LABELS))
     parser.add_argument("--min-agreement", type=float, default=None, help="exit 1 below this agreement")
     parser.add_argument("--min-kappa", type=float, default=None, help="exit 1 below this Cohen's kappa")
+    parser.add_argument("--max-wait", type=float, default=120.0,
+                        help="seconds to wait for a rate limit to lift before giving up on a case (0 = never wait)")
+    parser.add_argument("--retries", type=int, default=3, help="retries per case after waiting out a rate limit")
     args = parser.parse_args()
 
     cases = load_cases(Path(args.labels))
     print(f"Judging {len(cases)} labelled case(s) from {args.labels}...\n")
-    report = evaluate_judge(CausalGraphJudge(), cases)
+    judge = CausalGraphJudge()
+    report = evaluate_judge(
+        judge, cases,
+        retries=args.retries if args.max_wait > 0 else 0,
+        wait_for=judge.seconds_until_available,
+        max_wait_seconds=args.max_wait,
+        sleep=lambda seconds: (print(f"  ...rate limited; waiting {seconds:.0f}s", flush=True), time.sleep(seconds))[1],
+    )
 
     for r in report.results:
         mark = "  ?  " if r.verdict is None else ("  ok " if r.verdict == r.label else " MISS")

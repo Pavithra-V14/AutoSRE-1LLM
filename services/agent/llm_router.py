@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
@@ -8,6 +9,7 @@ from typing import Callable, Iterable, Optional
 import httpx
 from dotenv import load_dotenv
 
+from services.agent import tracing
 from services.agent.logging_utils import log_stage
 
 load_dotenv()
@@ -42,6 +44,42 @@ _provider_cooldowns: dict[str, float] = {}
 _provider_consecutive_failures: dict[str, int] = {}
 
 
+KNOWN_PROVIDERS = ("groq", "gemini", "openrouter")
+
+# "try again in 2m3.6s" (Groq), "retry in 17.3s" (Gemini), "retryDelay": "17s"
+_RETRY_PHRASE = re.compile(r"(?:try again|retry)\w*\s+in\s+(?P<t>(?:\d+(?:\.\d+)?\s*(?:ms|h|m|s)\s*)+)", re.IGNORECASE)
+_RETRY_DELAY_FIELD = re.compile(r"retrydelay\W{1,6}(?P<t>\d+(?:\.\d+)?\s*s)", re.IGNORECASE)
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", re.IGNORECASE)
+_UNIT_SECONDS = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+
+
+def parse_retry_after_seconds(error_message: str) -> Optional[float]:
+    """Seconds the provider says to wait, if its error message says so.
+
+    Providers state the real wait in the 429 body. Ignoring it and applying a
+    blind 60 s x 2^n cooldown meant either hammering a limit that would not
+    lift for hours (a daily token cap) or sitting out a window that had
+    already reopened."""
+    text = error_message or ""
+    match = _RETRY_PHRASE.search(text) or _RETRY_DELAY_FIELD.search(text)
+    if not match:
+        return None
+    total = sum(float(value) * _UNIT_SECONDS[unit.lower()] for value, unit in _DURATION_PART.findall(match.group("t")))
+    return total if total > 0 else None
+
+
+def configured_provider_order() -> list[str]:
+    """LLM_PROVIDER_ORDER, e.g. "groq,gemini" to leave out OpenRouter's free
+    routed models (they have answered JSON requests with a safety-classifier
+    verdict). Unknown names are rejected rather than silently ignored."""
+    raw = os.getenv("LLM_PROVIDER_ORDER", ",".join(KNOWN_PROVIDERS))
+    order = [name.strip().lower() for name in raw.split(",") if name.strip()]
+    unknown = [name for name in order if name not in KNOWN_PROVIDERS]
+    if unknown:
+        raise ValueError(f"LLM_PROVIDER_ORDER has unknown provider(s) {unknown}; expected from {list(KNOWN_PROVIDERS)}")
+    return order
+
+
 def _classify_failure(error_message: str) -> tuple[str, int]:
     """Returns (failure_class, base_cooldown_seconds) -- the BASE value
     before exponential backoff is applied. Order matters -- check the
@@ -57,14 +95,19 @@ def _classify_failure(error_message: str) -> tuple[str, int]:
     return "other", 0  # not a rate/quota/size issue -- no cooldown, may well be transient/one-off
 
 
-def _record_failure(provider_name: str, base_cooldown: int) -> int:
+def _record_failure(provider_name: str, base_cooldown: int, retry_after: Optional[float] = None) -> int:
     """Applies exponential backoff: 1st failure -> base_cooldown,
     2nd consecutive failure -> base_cooldown*2, 3rd -> base_cooldown*4,
     etc., capped at LLM_MAX_COOLDOWN_SECONDS. Sets the actual cooldown and
     returns the seconds applied, for logging."""
     consecutive = _provider_consecutive_failures.get(provider_name, 0) + 1
     _provider_consecutive_failures[provider_name] = consecutive
-    actual_cooldown = min(base_cooldown * (2 ** (consecutive - 1)), LLM_MAX_COOLDOWN_SECONDS)
+    if retry_after is not None:
+        # The provider told us when the limit lifts: trust it (plus a second of
+        # slack) instead of guessing with exponential backoff.
+        actual_cooldown = min(int(retry_after) + 1, LLM_MAX_COOLDOWN_SECONDS)
+    else:
+        actual_cooldown = min(base_cooldown * (2 ** (consecutive - 1)), LLM_MAX_COOLDOWN_SECONDS)
     _provider_cooldowns[provider_name] = time.time() + actual_cooldown
     return actual_cooldown
 
@@ -106,14 +149,33 @@ class LLMRouter:
         self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 
+    def seconds_until_available(self) -> float:
+        """0 if some configured provider can be called now; otherwise how long
+        until the soonest one comes out of cooldown. Long-running tools use it
+        to wait for a rate limit to lift instead of abandoning a run."""
+        remaining: list[float] = []
+        for name in configured_provider_order():
+            left = _is_in_cooldown(name)
+            if left is None:
+                return 0.0
+            remaining.append(left)
+        return min(remaining) if remaining else 0.0
+
     def _provider_chain(
         self, prefer: Optional[str], demote: Iterable[str] = ()
     ) -> list[Callable[..., LLMResponse]]:
-        chain = [self._try_groq, self._try_gemini, self._try_openrouter]
+        order = configured_provider_order()
+        if not order:
+            raise ProviderError("LLM_PROVIDER_ORDER names no providers")
+        chain = [getattr(self, f"_try_{name}") for name in order]
         if prefer:
+            if prefer not in KNOWN_PROVIDERS:
+                raise ValueError(f"unknown LLM provider '{prefer}' (expected groq, gemini or openrouter)")
             preferred = [fn for fn in chain if fn.__name__ == f"_try_{prefer}"]
             if not preferred:
-                raise ValueError(f"unknown LLM provider '{prefer}' (expected groq, gemini or openrouter)")
+                # asked for a provider the configured order excludes: honor the
+                # explicit per-call request rather than ignoring it
+                preferred = [getattr(self, f"_try_{prefer}")]
             chain = preferred + [fn for fn in chain if fn not in preferred]
         demoted = {f"_try_{name}" for name in demote}
         # Stable partition: demoted providers keep their relative order but go
@@ -130,6 +192,28 @@ class LLMRouter:
         demote: Iterable[str] = (),
         temperature: Optional[float] = None,
         json_schema: Optional[dict] = None,
+    ) -> LLMResponse:
+        """One LLM call, traced. Span attributes are numbers and names only --
+        never the prompt or the response (they may carry PII)."""
+        with tracing.span(
+            "llm.complete", json_mode=json_mode, prefer=prefer or "", schema=(json_schema or {}).get("name", ""),
+        ) as sp:
+            resp = self._complete(prompt, system, json_mode, prefer, demote, temperature, json_schema)
+            sp.set(
+                provider=resp.provider, model=resp.model, input_tokens=resp.input_tokens,
+                output_tokens=resp.output_tokens, latency_ms=resp.latency_ms, finish_reason=resp.finish_reason,
+            )
+            return resp
+
+    def _complete(
+        self,
+        prompt: str,
+        system: str,
+        json_mode: bool,
+        prefer: Optional[str],
+        demote: Iterable[str],
+        temperature: Optional[float],
+        json_schema: Optional[dict],
     ) -> LLMResponse:
         """json_mode asks the provider to constrain output to a single JSON
         object (Groq response_format, Gemini response_mime_type). OpenRouter
@@ -193,7 +277,8 @@ class LLMRouter:
                 return resp
             except ProviderError as e:
                 failure_class, base_cooldown = _classify_failure(str(e))
-                actual_cooldown = _record_failure(provider_name, base_cooldown) if base_cooldown > 0 else 0
+                retry_after = parse_retry_after_seconds(str(e)) if base_cooldown > 0 else None
+                actual_cooldown = _record_failure(provider_name, base_cooldown, retry_after) if base_cooldown > 0 else 0
                 log_stage(
                     "llm_provider", "-", "FAIL", provider=provider_name, reason=str(e)[:100],
                     failure_class=failure_class,

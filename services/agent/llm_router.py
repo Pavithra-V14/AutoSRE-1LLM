@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Iterable, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -28,6 +28,10 @@ class ProviderError(Exception):
     pass
 
 MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "4096"))
+# Investigation and grading want repeatable answers, not creative ones: the
+# same evidence should produce the same conclusion. Providers' own defaults
+# (~1.0) were a measurable source of run-to-run variance.
+DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
 LLM_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("LLM_RATE_LIMIT_COOLDOWN_SECONDS", "60"))
 LLM_QUOTA_COOLDOWN_SECONDS = int(os.getenv("LLM_QUOTA_COOLDOWN_SECONDS", "3600"))
 LLM_OVERSIZED_COOLDOWN_SECONDS = int(os.getenv("LLM_OVERSIZED_COOLDOWN_SECONDS", "86400"))
@@ -100,9 +104,44 @@ class LLMRouter:
         self.groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 
-    def complete(self, prompt: str, system: str = "") -> LLMResponse:
+    def _provider_chain(
+        self, prefer: Optional[str], demote: Iterable[str] = ()
+    ) -> list[Callable[..., LLMResponse]]:
+        chain = [self._try_groq, self._try_gemini, self._try_openrouter]
+        if prefer:
+            preferred = [fn for fn in chain if fn.__name__ == f"_try_{prefer}"]
+            if not preferred:
+                raise ValueError(f"unknown LLM provider '{prefer}' (expected groq, gemini or openrouter)")
+            chain = preferred + [fn for fn in chain if fn not in preferred]
+        demoted = {f"_try_{name}" for name in demote}
+        # Stable partition: demoted providers keep their relative order but go
+        # last. They are still tried if everything else fails -- demotion
+        # reorders, it never removes a provider.
+        return [fn for fn in chain if fn.__name__ not in demoted] + [fn for fn in chain if fn.__name__ in demoted]
+
+    def complete(
+        self,
+        prompt: str,
+        system: str = "",
+        json_mode: bool = False,
+        prefer: Optional[str] = None,
+        demote: Iterable[str] = (),
+        temperature: Optional[float] = None,
+    ) -> LLMResponse:
+        """json_mode asks the provider to constrain output to a single JSON
+        object (Groq response_format, Gemini response_mime_type). OpenRouter
+        is deliberately excluded: its free routed models reject
+        response_format unpredictably, which would turn a formatting hint
+        into a hard failure -- callers still parse defensively either way.
+        `prefer` moves one provider to the front of the fallback order
+        (used by the benchmark judge to avoid grading a model with itself).
+        `demote` moves providers to the back of the order -- used when a
+        provider just returned unusable output (e.g. a free routed model
+        answering with a safety-classifier verdict instead of JSON).
+        `temperature` overrides LLM_TEMPERATURE for this call."""
+        resolved_temperature = DEFAULT_TEMPERATURE if temperature is None else temperature
         errors = []
-        for fn in (self._try_groq, self._try_gemini, self._try_openrouter):
+        for fn in self._provider_chain(prefer, demote):
             provider_name = fn.__name__.replace("_try_", "")
 
             cooldown_remaining = _is_in_cooldown(provider_name)
@@ -115,7 +154,7 @@ class LLMRouter:
                 continue
 
             try:
-                resp = fn(prompt, system)
+                resp = fn(prompt, system, json_mode, resolved_temperature)
                 _record_success(provider_name)
                 log_stage(
                     "llm_provider", "-", "OK", provider=provider_name, model=resp.model,
@@ -142,13 +181,14 @@ class LLMRouter:
             f"All providers failed or are unconfigured: {'; '.join(errors)}"
         )
 
-    def _try_groq(self, prompt: str, system: str) -> LLMResponse:
+    def _try_groq(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
         if not self.groq_key:
             raise ProviderError("groq: no API key configured")
         from groq import Groq
 
         start = time.time()
         client = Groq(api_key=self.groq_key)
+        extra: dict = {"response_format": {"type": "json_object"}} if json_mode else {}
         try:
             resp = client.chat.completions.create(
                 model=self.groq_model,
@@ -157,6 +197,8 @@ class LLMRouter:
                     {"role": "user", "content": prompt},
                 ],
                 max_completion_tokens=MAX_OUTPUT_TOKENS,
+                temperature=temperature,
+                **extra,
             )
         except Exception as e: 
             raise ProviderError(f"groq: {e}")
@@ -172,7 +214,7 @@ class LLMRouter:
             finish_reason=resp.choices[0].finish_reason or "unknown",
         )
 
-    def _try_gemini(self, prompt: str, system: str) -> LLMResponse:
+    def _try_gemini(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
         if not self.gemini_key:
             raise ProviderError("gemini: no API key configured")
 
@@ -190,6 +232,8 @@ class LLMRouter:
                 config=types.GenerateContentConfig(
                     system_instruction=system or None,
                     max_output_tokens=MAX_OUTPUT_TOKENS,
+                    temperature=temperature,
+                    response_mime_type="application/json" if json_mode else None,
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
@@ -210,7 +254,7 @@ class LLMRouter:
             finish_reason=finish_reason,
         )
 
-    def _try_openrouter(self, prompt: str, system: str) -> LLMResponse:
+    def _try_openrouter(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
         if not self.openrouter_key:
             raise ProviderError("openrouter: no API key configured")
 
@@ -230,6 +274,7 @@ class LLMRouter:
                         {"role": "user", "content": prompt},
                     ],
                     "max_tokens": MAX_OUTPUT_TOKENS,
+                    "temperature": temperature,
                 },
                 timeout=30.0,
             )

@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-DEGRADATION_STATUSES = {"unreachable", "empty", "denied", "invalid_plan", "duplicate_call_skipped"}
+# Tool-side degradation only. "invalid_plan" and "duplicate_call_skipped" are
+# planner behaviour, not a degraded dependency; counting them made healthy
+# runs look like they had recovered from a failure and skewed recovery_rate.
+DEGRADATION_STATUSES = {"unreachable", "empty", "denied"}
 
 MUTATING_TOOLS = {"restart_service", "rollback_deploy"}
 
@@ -58,7 +61,9 @@ def reached_valid_conclusion(result: dict[str, Any]) -> bool:
     if hypothesis.startswith("ABORTED") or hypothesis.startswith("DEDUPLICATED"):
         return False
     causal_graph = result.get("causal_graph") or {}
-    return bool(causal_graph.get("edges")) or causal_graph.get("confidence", 0) is not None
+    # synthesize_step marks graphs it had to fabricate on failure with
+    # "aborted": True; an empty-but-honest low-confidence graph has no marker.
+    return bool(causal_graph) and not causal_graph.get("aborted")
 
 
 @dataclass

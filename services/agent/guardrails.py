@@ -6,15 +6,20 @@ os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from typing import Any, Optional
 
-def redact_pii(text: str) -> str:
-    """Detect and redact PII before any log/metric text enters the agent's
-    context. Falls back to a no-op with a warning if Presidio isn't
-    installed yet -- keep the pipeline running during early development."""
+def redact_pii(text: str, entities: Optional[list[str]] = None) -> str:
+    """Detect and redact PII before text enters the agent's context. Falls
+    back to a no-op with a warning if Presidio isn't installed yet -- keep
+    the pipeline running during early development.
+
+    `entities` restricts detection to the named Presidio entity types. Tool
+    output must pass an explicit list: the default (all entities) also
+    rewrites timestamps and place-like words into <DATE_TIME>/<LOCATION>,
+    which destroys the evidence an investigation depends on."""
     analyzer, anonymizer = _get_presidio_engines()
     if analyzer is None:
-        return text  
+        return text
 
-    results = analyzer.analyze(text=text, language="en")
+    results = analyzer.analyze(text=text, language="en", entities=entities)
     return anonymizer.anonymize(text=text, analyzer_results=results).text
 
 

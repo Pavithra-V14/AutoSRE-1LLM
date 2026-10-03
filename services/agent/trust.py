@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from services.agent import vocabulary
 from services.agent.persistence import get_pattern_trust_stats, record_trust_event
 
 MIN_SAMPLE_SIZE = 5
@@ -21,6 +22,12 @@ def compute_pattern_key(causal_graph: Optional[dict[str, Any]]) -> str:
     edges = causal_graph.get("edges", [])
     if not edges:
         return "unclassified"
+
+    # Vocabulary-form graphs key on trigger kind + first effect, which is
+    # stable across different deploys causing the same failure.
+    vocabulary_key = vocabulary.pattern_key(causal_graph)
+    if vocabulary_key:
+        return vocabulary_key
 
     proximate_cause = str(edges[0].get("to", "")).strip().lower()
     if not proximate_cause:

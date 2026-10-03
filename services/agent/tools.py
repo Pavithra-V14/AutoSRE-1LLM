@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from services.agent.logging_utils import log_stage
 from services.agent.tokens import TokenIssuanceError, get_or_issue_token
 
-SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8000")
+SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8100")
 
 
 class ToolRole(str, Enum):
@@ -68,6 +68,31 @@ BLAST_RADIUS = {
 # reading it. Read-only calls (get_metrics etc.) shouldn't generate a
 # notification on every call -- that would be noise, not visibility.
 MUTATING_TOOLS = {"restart_service", "rollback_deploy"}
+
+
+# The only request params each simulator endpoint actually reads (see
+# ToolRequest in services/simulator/main.py). Anything else a planner adds
+# -- e.g. {"tail": 500} on get_logs -- is silently ignored server-side, so
+# two calls differing only in such params return identical data.
+TOOL_SUPPORTED_PARAMS: dict[str, frozenset[str]] = {
+    "get_metrics": frozenset({"service", "since"}),
+    "get_logs": frozenset({"service", "since"}),
+    "get_deploy_history": frozenset({"service", "since"}),
+    "restart_service": frozenset({"service"}),
+    "rollback_deploy": frozenset({"service"}),
+}
+
+
+def canonical_params(tool: str, params: dict[str, Any]) -> dict[str, Any]:
+    """The subset of `params` the tool actually honors, with empty values
+    dropped. This -- not the planner's raw params -- defines call identity."""
+    supported = TOOL_SUPPORTED_PARAMS.get(tool, frozenset())
+    return {k: params[k] for k in sorted(params) if k in supported and params[k] not in (None, "")}
+
+
+def call_signature(tool: str, params: dict[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]]:
+    canonical = canonical_params(tool, params if isinstance(params, dict) else {})
+    return tool, tuple((k, str(v)) for k, v in canonical.items())
 
 
 class BudgetExceeded(Exception):
@@ -142,7 +167,9 @@ class ToolExecutor:
         try:
             r = httpx.post(
                 f"{SIMULATOR_BASE_URL}/tools/{request.tool}",
-                json={"incident_id": request.incident_id, **request.params},
+                # Only honored params are sent, and incident_id is applied
+                # last so a model-supplied param can never override it.
+                json={**canonical_params(request.tool, request.params), "incident_id": request.incident_id},
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
@@ -174,7 +201,7 @@ class ToolExecutor:
         except httpx.HTTPError:
             return self._degrade(request, "unreachable")
 
-    def _degrade(self, request: ToolCallRequest, status: str) -> ToolCallResult:
+    def _degrade(self, request: ToolCallRequest, status: Literal["empty", "unreachable"]) -> ToolCallResult:
         if request.role == ToolRole.REQUIRED:
             # Fail closed: do not guess. The graph node calling this must
             # surface this as an explicit "cannot confirm/deny" statement.

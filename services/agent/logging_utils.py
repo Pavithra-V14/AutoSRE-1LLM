@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 ENABLED = os.getenv("LOG_STAGES", "1") != "0"
 
@@ -30,7 +31,12 @@ def log_stage(stage: str, incident_id: str, status: str, **details: object) -> N
     color = "" if _NO_COLOR else STATUS_COLOR.get(status, "")
     reset = "" if _NO_COLOR else RESET
 
-    print(
-        f"[{ts}] {stage:<18} incident={short_id} {color}{status:<8}{reset} {detail_str}",
-        flush=True,
-    )
+    line = f"[{ts}] {stage:<18} incident={short_id} {color}{status:<8}{reset} {detail_str}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        # LLM-derived text (e.g. a non-breaking hyphen) can't be encoded by a
+        # legacy console codepage such as Windows cp1252. Logging must never
+        # take down an investigation, so degrade the characters instead.
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(line.encode(encoding, errors="replace").decode(encoding), flush=True)

@@ -86,6 +86,7 @@ def compute_cost_usd(provider: str, input_tokens: int, output_tokens: int) -> fl
     in_rate, out_rate = EQUIVALENT_PAID_RATES.get(provider, (0.0, 0.0))
     return round((input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate, 6)
 
+_warned_missing_scoring_columns = False
 _write_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="trace-writer")
 _pending_writes: list[Future] = []
 
@@ -271,7 +272,15 @@ def insert_benchmark_run(
     needed_approval: Optional[bool] = None,
     had_degradation: Optional[bool] = None,
     recovered: Optional[bool] = None,
+    score_method: Optional[str] = None,
+    score: Optional[float] = None,
+    score_rationale: Optional[str] = None,
+    run_index: Optional[int] = None,
 ) -> None:
+    """The four trailing fields (why a run passed or failed) need the columns
+    added by infra/db/migrations/002_benchmark_scoring.sql. Until that
+    migration is applied the insert is retried without them, so an
+    out-of-date database never loses the pass/fail record itself."""
     row = {
         "run_id": run_id,
         "scenario": scenario,
@@ -286,12 +295,35 @@ def insert_benchmark_run(
         "recovered": recovered,
     }
 
+    scoring_columns = {
+        "score_method": score_method,
+        "score": score,
+        "score_rationale": (score_rationale or None) and score_rationale[:1000],
+        "run_index": run_index,
+    }
     client = _client_or_none()
     if client is None:
-        print(f"[persistence:noop] benchmark run not saved: {row}")
+        print(f"[persistence:noop] benchmark run not saved: {row | scoring_columns}")
         return
 
-    _safe("insert_benchmark_run", lambda: client.table("benchmark_runs").insert(row).execute(), None)
+    def _insert() -> None:
+        try:
+            client.table("benchmark_runs").insert({**row, **scoring_columns}).execute()
+        except Exception as e:
+            text = str(e).lower()
+            if "column" not in text or not any(name in text for name in scoring_columns):
+                raise
+            global _warned_missing_scoring_columns
+            if not _warned_missing_scoring_columns:
+                _warned_missing_scoring_columns = True
+                print(
+                    "[persistence:warn] benchmark_runs has no scoring columns -- apply "
+                    "infra/db/migrations/002_benchmark_scoring.sql to keep the judge's verdict; "
+                    "saving pass/fail only"
+                )
+            client.table("benchmark_runs").insert(row).execute()
+
+    _safe("insert_benchmark_run", _insert, None)
 
 
 def get_incident_cost_summary(incident_id: str) -> Optional[dict[str, Any]]:

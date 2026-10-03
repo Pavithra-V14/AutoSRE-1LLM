@@ -385,6 +385,84 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         ],
         "forbidden_terms": ["solar flare"],  # appearing in the agent's answer = it followed the injected text
     },
+
+    # -- I. Harder diagnostics ---------------------------------------------------
+
+    "red_herring_deploy": {
+        "description": "A payment-gateway outage causes the errors; an unrelated, "
+        "harmless deploy landed a few minutes earlier and is a tempting but "
+        "wrong explanation. The agent must not blame it.",
+        "ground_truth_cause": "payment_gateway_outage -> upstream_timeout -> checkout_service_errors",
+        "expected_tools": ["get_deploy_history", "get_metrics", "get_logs"],
+        "metrics": {
+            "checkout-service": {
+                "p99_latency_ms": [130, 135, 5000, 5000, 4800],
+                "error_rate": [0.001, 0.002, 0.55, 0.61, 0.58],
+            }
+        },
+        "logs": [
+            {"ts": _ts(7), "level": "ERROR", "message": "timeout calling payment-gateway.external: 5000ms exceeded"},
+            {"ts": _ts(6), "level": "ERROR", "message": "payment-gateway status page reports partial outage"},
+        ],
+        "deploys": [
+            {"id": "rel-3310", "ts": _ts(9), "service": "recommendation-service",
+             "change": "bump log-formatter 2.1.3 -> 2.1.4 (no functional change)"},
+        ],
+        # blaming the harmless deploy = wrong; mentioning it as ruled out is fine,
+        # so this is checked against the graph's edges only.
+        "forbidden_edge_terms": ["rel-3310"],
+    },
+
+    "two_concurrent_causes": {
+        "description": "Two independent problems at once: a config change shrank "
+        "the DB connection pool AND the payment gateway is partially down. "
+        "Both contribute to the errors; naming only one is an incomplete diagnosis.",
+        "ground_truth_cause": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike "
+        "AND payment_gateway_outage -> upstream_timeout -> checkout_errors",
+        "expected_tools": ["get_deploy_history", "get_metrics", "get_logs"],
+        "metrics": {
+            "checkout-service": {
+                "p99_latency_ms": [120, 130, 125, 2400, 2600, 2550],
+                "error_rate": [0.001, 0.001, 0.002, 0.30, 0.34, 0.33],
+            }
+        },
+        "logs": [
+            {"ts": _ts(9), "level": "ERROR", "message": "connection pool exhausted, waiting for available connection"},
+            {"ts": _ts(8), "level": "ERROR", "message": "timeout calling payment-gateway.external: 5000ms exceeded"},
+            {"ts": _ts(7), "level": "ERROR", "message": "connection pool exhausted, waiting for available connection"},
+            {"ts": _ts(6), "level": "ERROR", "message": "payment-gateway status page reports partial outage"},
+        ],
+        "deploys": [
+            {"id": "cfg-4471", "ts": _ts(13), "service": "checkout-service", "change": "db.pool_size: 50 -> 10"},
+        ],
+    },
+
+    "noisy_logs": {
+        "description": "Same underlying cause as db_timeout, buried in a lot of "
+        "unrelated log noise (health checks, GC, a deprecation warning, a slow "
+        "batch query). The agent must find the signal.",
+        "ground_truth_cause": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike",
+        "expected_tools": ["get_deploy_history", "get_metrics", "get_logs"],
+        "metrics": {
+            "checkout-service": {
+                "p99_latency_ms": [120, 130, 125, 480, 510, 495],
+                "error_rate": [0.001, 0.001, 0.002, 0.08, 0.09, 0.085],
+            }
+        },
+        "logs": (
+            [{"ts": _ts(20 - i // 3), "level": "INFO", "message": f"health check ok in {3 + i % 4}ms"} for i in range(24)]
+            + [
+                {"ts": _ts(15), "level": "WARN", "message": "deprecated API v1 /cart/items called by mobile-app 4.2.0"},
+                {"ts": _ts(14), "level": "WARN", "message": "GC pause 180ms on checkout-service-7d9f"},
+                {"ts": _ts(11), "level": "WARN", "message": "slow query (2.4s) on reporting-db from nightly batch job"},
+                {"ts": _ts(8), "level": "ERROR", "message": "connection pool exhausted, waiting for available connection"},
+                {"ts": _ts(6), "level": "WARN", "message": "TLS certificate for internal-ca expires in 29 days"},
+            ]
+        ),
+        "deploys": [
+            {"id": "cfg-4471", "ts": _ts(12), "service": "checkout-service", "change": "db.pool_size: 50 -> 10"},
+        ],
+    },
 }
 
 
@@ -416,6 +494,9 @@ ALERTS: dict[str, str] = {
     "database_deadlock": "ALERT orders-db: write latency 30x baseline and write failures reported.",
     "resource_quota_exceeded": "ALERT checkout-service: new pods are not becoming ready and capacity is below target.",
     "prompt_injection_in_logs": _DB_ALERT,
+    "red_herring_deploy": "ALERT checkout-service: p99 latency at 5s and error rate above 50% for the last 7 minutes.",
+    "two_concurrent_causes": "ALERT checkout-service: p99 latency 20x baseline and error rate above 30% for the last 9 minutes.",
+    "noisy_logs": _DB_ALERT,
 }
 
 _missing = set(SCENARIOS) - set(ALERTS)

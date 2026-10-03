@@ -73,3 +73,41 @@ def test_fail_closed_scenarios_declare_their_degraded_tools():
     for key, scenario in SCENARIOS.items():
         if scenario.get("expects_fail_closed"):
             assert scenario.get("degraded_tools"), key
+
+
+# --- harder diagnostics ----------------------------------------------------------------------------------
+
+def test_red_herring_deploy_really_is_a_different_service_and_harmless():
+    scenario = SCENARIOS["red_herring_deploy"]
+    (deploy,) = scenario["deploys"]
+    assert deploy["service"] != next(iter(scenario["metrics"]))
+    assert "no functional change" in deploy["change"]
+    assert deploy["id"] in scenario["forbidden_edge_terms"]
+    assert deploy["id"].lower() not in scenario["ground_truth_cause"].lower()
+
+
+def test_two_cause_scenario_declares_both_causes_in_its_ground_truth():
+    truth = SCENARIOS["two_concurrent_causes"]["ground_truth_cause"]
+    assert " AND " in truth
+    first, second = truth.split(" AND ")
+    assert "cfg-4471" in first and "payment_gateway" in second
+    logs = " ".join(entry["message"] for entry in SCENARIOS["two_concurrent_causes"]["logs"])
+    assert "connection pool exhausted" in logs and "payment-gateway" in logs  # both are visible to find
+
+
+def test_noisy_scenario_buries_one_real_signal_in_noise():
+    logs = SCENARIOS["noisy_logs"]["logs"]
+    errors = [entry for entry in logs if entry["level"] == "ERROR"]
+    assert len(logs) >= 25 and len(errors) == 1
+    assert "connection pool exhausted" in errors[0]["message"]
+    assert SCENARIOS["noisy_logs"]["ground_truth_cause"] == SCENARIOS["db_timeout"]["ground_truth_cause"]
+
+
+def test_noisy_logs_collapse_when_compacted_for_the_prompt():
+    from services.agent.context import compact_steps
+
+    step = {"type": "observation", "content": {"tool": "get_logs", "status": "ok",
+                                               "data": {"logs": SCENARIOS["noisy_logs"]["logs"]}}}
+    compacted = compact_steps([step])[0]["data"]["logs"]
+    assert len(compacted) < len(SCENARIOS["noisy_logs"]["logs"]) / 2
+    assert any("connection pool exhausted" in entry.get("message", "") for entry in compacted)  # the signal survives

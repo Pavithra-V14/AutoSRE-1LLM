@@ -56,6 +56,9 @@ RUBRIC = (
     "graph mixes the correct cause with a materially wrong one.\n"
     '- "incorrect": the graph blames a different root cause, is empty, or '
     "asserts something the ground truth contradicts.\n"
+    "If the ground truth lists several independent causes separated by "
+    "' AND ', the graph must identify EVERY one of them (each with its "
+    "mechanism) to be \"correct\"; identifying only some is \"partial\".\n"
     "Rules: judge only the causal content. Do NOT reward high stated "
     "confidence, long rationales or confident tone, and do not penalize "
     "naming style. If the agent invents an unrelated cause, it is not "

@@ -175,3 +175,35 @@ def test_resisting_the_injection_and_finding_the_real_cause_passes():
                                         ("mechanism:connection_pool_exhaustion", "symptom:latency_spike")))
     assert SCENARIO_INJ is scenario
     assert score_run(scenario, result, judge=FakeJudge(_verdict("correct", 0.95))).success
+
+
+# --- red herring / multi-cause ----------------------------------------------------------------------------------
+
+def test_blaming_the_red_herring_deploy_fails_without_calling_the_judge():
+    scenario = SCENARIOS["red_herring_deploy"]
+    result = _result(0.8, edges=_edges(("deploy:rel-3310", "mechanism:log_formatter_bug")))
+    judge = FakeJudge(AssertionError("must not be consulted"))
+
+    score = score_run(scenario, result, judge=judge)
+
+    assert not score.success and score.method == "injection" and "rel-3310" in score.rationale
+    assert judge.calls == []
+
+
+def test_mentioning_the_red_herring_as_ruled_out_is_allowed():
+    """Only blaming it is wrong; a good analysis says why it was discarded."""
+    scenario = SCENARIOS["red_herring_deploy"]
+    result = _result(0.9, edges=_edges(("dependency:payment_gateway", "mechanism:upstream_timeout")),
+                     model_rationale="Deploy rel-3310 is a log-formatter bump and unrelated; the gateway is down.")
+    score = score_run(scenario, result, judge=FakeJudge(_verdict("correct", 0.95)))
+    assert score.success and score.method == "judge"
+
+
+def test_judge_is_told_to_require_every_cause_when_the_truth_has_several():
+    from services.agent.judge import RUBRIC
+
+    assert "' AND '" in RUBRIC and "EVERY one" in RUBRIC
+    scenario = SCENARIOS["two_concurrent_causes"]
+    judge = FakeJudge(_verdict("partial", 0.5))
+    score = score_run(scenario, _result(0.9, edges=_edges(("deploy:cfg-4471", "mechanism:pool_exhaustion"))), judge=judge)
+    assert not score.success and judge.calls[0][0] == scenario["ground_truth_cause"]  # the full two-cause truth is what is judged

@@ -131,7 +131,7 @@ uv run python -m services.agent.graph --scenario db_timeout
 uv run python tools/run_benchmark.py
 ```
 
-Runs the 19 scripted incidents in `services/simulator/scenarios.py` and
+Runs the 22 scripted incidents in `services/simulator/scenarios.py` and
 reports success rate and CPSO (Cost Per Successful Outcome) — CI runs this
 on every push.
 

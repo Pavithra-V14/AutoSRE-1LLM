@@ -155,6 +155,10 @@ def main() -> None:
             needed_approval=r["evaluation"].needed_approval,
             had_degradation=r["evaluation"].had_degradation,
             recovered=r["evaluation"].recovered,
+            score_method=r["score_method"],
+            score=r["match_ratio"],
+            score_rationale=r["score_rationale"],
+            run_index=run_number,
         )
 
     n = len(results)

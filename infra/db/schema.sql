@@ -51,6 +51,10 @@ create table if not exists benchmark_runs (
     needed_approval boolean,          
     had_degradation boolean,         
     recovered boolean,               
+    score_method text,                -- judge | flags | lexical | lexical_fallback | injection | aborted
+    score numeric(4, 3),              -- 0..1: the judge's score or the fraction of flag checks passed
+    score_rationale text,             -- why: the judge's reason or which flag check failed
+    run_index int,                    -- 1..N when a scenario is run several times (--runs)
     created_at timestamptz default now()
 );
 

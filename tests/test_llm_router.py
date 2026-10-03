@@ -35,15 +35,15 @@ def test_unknown_preferred_provider_is_rejected():
 def test_demoted_provider_is_tried_last_but_still_tried(monkeypatch):
     calls: list[str] = []
 
-    def _try_groq(self, prompt, system, json_mode=False, temperature=0.0):
+    def _try_groq(self, prompt, system, json_mode=False, temperature=0.0, json_schema=None):
         calls.append("groq")
         return llm("from groq", provider="groq")
 
-    def _try_gemini(self, prompt, system, json_mode=False, temperature=0.0):
+    def _try_gemini(self, prompt, system, json_mode=False, temperature=0.0, json_schema=None):
         calls.append("gemini")
         raise ProviderError("gemini: down")
 
-    def _try_openrouter(self, prompt, system, json_mode=False, temperature=0.0):
+    def _try_openrouter(self, prompt, system, json_mode=False, temperature=0.0, json_schema=None):
         calls.append("openrouter")
         raise ProviderError("openrouter: down")
 
@@ -60,7 +60,7 @@ def test_demoted_provider_is_tried_last_but_still_tried(monkeypatch):
 def _capture_temperature(monkeypatch):
     seen: list[float] = []
 
-    def _try_groq(self, prompt, system, json_mode=False, temperature=0.0):
+    def _try_groq(self, prompt, system, json_mode=False, temperature=0.0, json_schema=None):
         seen.append(temperature)
         return llm("ok", provider="groq")
 

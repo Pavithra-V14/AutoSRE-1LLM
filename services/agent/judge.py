@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from services.agent.llm_router import LLMRouter
+from services.agent.schemas import JUDGE_SCHEMA
 from services.agent.structured import complete_json
 
 VERDICTS = ("correct", "partial", "incorrect")
@@ -127,6 +128,7 @@ class CausalGraphJudge:
             validator=_validate_verdict,
             prefer=self._prefer,
             temperature=JUDGE_TEMPERATURE,
+            json_schema=JUDGE_SCHEMA,
             stage="judge_json",
         )
         data = result.data

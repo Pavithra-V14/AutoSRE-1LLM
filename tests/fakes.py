@@ -25,9 +25,10 @@ class FakeRouter:
 
     def complete(self, prompt: str, system: str = "", json_mode: bool = False,
                  prefer: Optional[str] = None, demote: tuple = (),
-                 temperature: Optional[float] = None) -> LLMResponse:
+                 temperature: Optional[float] = None, json_schema: Optional[dict] = None) -> LLMResponse:
         self.calls.append({"prompt": prompt, "system": system, "json_mode": json_mode,
-                           "prefer": prefer, "demote": tuple(demote), "temperature": temperature})
+                           "prefer": prefer, "demote": tuple(demote), "temperature": temperature,
+                           "json_schema": json_schema})
         if not self._responses:
             raise AssertionError("FakeRouter exhausted: the code made more LLM calls than the test scripted")
         item = self._responses.pop(0)

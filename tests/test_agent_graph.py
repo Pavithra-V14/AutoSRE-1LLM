@@ -516,3 +516,123 @@ def test_weakly_supported_edge_is_flagged_but_kept(monkeypatch):
 
     assert graph["weak_citations"] == ["e1"]
     assert len(graph["edges"]) == 1  # flagged for a human, never discarded
+
+
+# --- recommended action, escalation, provider routing --------------------------------------------------------------------
+
+def _graph_json(confidence="0.9", action="rollback_deploy", service='"checkout-service"', root="deploy:cfg-4471", cite="1"):
+    return ('{"edges": [{"id": "e1", "from": "%s", "to": "mechanism:pool_exhaustion", "evidence_tool_call_id": "%s"}], '
+            '"confidence": %s, "confidence_rationale": "r", '
+            '"recommended_action": {"action": "%s", "service": %s, "rationale": "revert it"}}') % (root, cite, confidence, action, service)
+
+
+def test_synthesis_uses_schema_output_and_shows_worked_examples(monkeypatch):
+    router = FakeRouter([llm(_graph_json())])
+    monkeypatch.setattr(g, "router", router)
+    g.synthesize_step(_state(_baseline()))
+
+    assert router.calls[0]["json_schema"]["name"] == "causal_graph"
+    prompt = router.calls[0]["prompt"]
+    assert "Worked examples" in prompt and "Example B" in prompt and "recommended_action" in prompt
+
+
+def test_recommended_rollback_goes_to_a_human_with_the_real_action(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(g, "post_approval_request", lambda **kw: sent.update(kw))
+    monkeypatch.setattr(g, "router", FakeRouter([llm(_graph_json())]))
+
+    state = g.synthesize_step(_state(_baseline()))
+
+    assert state["needs_approval"] is True  # rollback is a medium-blast action
+    assert sent["action"] == "rollback_deploy"
+    assert sent["blast_radius"] == "medium"
+    assert sent["service"] == "checkout-service"
+
+
+def test_no_recommendation_and_high_confidence_needs_no_approval(monkeypatch):
+    monkeypatch.setattr(g, "router", FakeRouter([llm(_graph_json(action="none", service="null"))]))
+    state = g.synthesize_step(_state(_baseline()))
+    assert state["needs_approval"] is False
+    assert state["causal_graph"]["recommended_action"]["action"] == "none"
+
+
+def test_rollback_recommendation_is_withheld_when_the_run_failed_closed(monkeypatch):
+    steps = [plan("get_metrics"), observation("get_metrics"),
+             plan("get_deploy_history"), observation("get_deploy_history", "unreachable", "required")]
+    monkeypatch.setattr(g, "router", FakeRouter([llm(_graph_json(cite="1"))]))
+
+    graph = g.synthesize_step(_state(steps))["causal_graph"]
+
+    assert graph["recommended_action"]["action"] == "none"
+    assert graph["recommended_action"]["original_action"] == "rollback_deploy"
+
+
+def test_invalid_action_is_reasked(monkeypatch):
+    router = FakeRouter([llm(_graph_json(action="drop_tables")), llm(_graph_json())])
+    monkeypatch.setattr(g, "router", router)
+    state = g.synthesize_step(_state(_baseline()))
+    assert state["causal_graph"]["recommended_action"]["action"] == "rollback_deploy"
+    assert "must be one of" in router.calls[1]["prompt"]
+
+
+def test_model_that_omits_the_action_field_still_validates(monkeypatch):
+    legacy = GOOD_GRAPH % ("1", "0.9")
+    monkeypatch.setattr(g, "router", FakeRouter([llm(legacy)]))
+    assert g.synthesize_step(_state(_baseline()))["causal_graph"]["recommended_action"]["action"] == "none"
+
+
+def test_unsure_synthesis_escalates_to_the_stronger_provider(monkeypatch):
+    router = FakeRouter([
+        llm(_graph_json(confidence="0.3", action="none", service="null"), provider="groq", input_tokens=100, output_tokens=40),
+        llm(_graph_json(confidence="0.85"), provider="gemini", input_tokens=120, output_tokens=50),
+    ])
+    monkeypatch.setattr(g, "router", router)
+    monkeypatch.setattr(g, "SYNTHESIS_ESCALATION_PROVIDER", "gemini")
+
+    state = g.synthesize_step(_state(_baseline()))
+
+    assert router.calls[1]["prefer"] == "gemini"
+    assert state["causal_graph"]["escalated_from"] == "groq"
+    assert state["confidence"] == 0.85
+    assert state["synthesis_input_tokens"] == 220  # both calls are paid for
+
+
+def test_confident_synthesis_does_not_escalate(monkeypatch):
+    router = FakeRouter([llm(_graph_json(confidence="0.9"), provider="groq")])
+    monkeypatch.setattr(g, "router", router)
+    monkeypatch.setattr(g, "SYNTHESIS_ESCALATION_PROVIDER", "gemini")
+    g.synthesize_step(_state(_baseline()))
+    assert len(router.calls) == 1
+
+
+def test_failed_escalation_keeps_the_first_answer(monkeypatch):
+    from services.agent.llm_router import ProviderError
+
+    router = FakeRouter([llm(_graph_json(confidence="0.3", action="none", service="null"), provider="groq"),
+                         ProviderError("gemini quota")])
+    monkeypatch.setattr(g, "router", router)
+    monkeypatch.setattr(g, "SYNTHESIS_ESCALATION_PROVIDER", "gemini")
+
+    state = g.synthesize_step(_state(_baseline()))
+    assert state["confidence"] == 0.3 and "escalated_from" not in state["causal_graph"]
+
+
+def test_escalation_is_skipped_when_already_on_the_target_provider(monkeypatch):
+    router = FakeRouter([llm(_graph_json(confidence="0.3", action="none", service="null"), provider="gemini")])
+    monkeypatch.setattr(g, "router", router)
+    monkeypatch.setattr(g, "SYNTHESIS_ESCALATION_PROVIDER", "gemini")
+    g.synthesize_step(_state(_baseline()))
+    assert len(router.calls) == 1
+
+
+def test_planner_and_synthesis_providers_are_routed_independently(monkeypatch):
+    router = FakeRouter([llm('{"action": "conclude", "reasoning": "x"}'), llm(_graph_json(action="none", service="null"))])
+    monkeypatch.setattr(g, "router", router)
+    monkeypatch.setattr(g, "PLANNER_PROVIDER", "groq")
+    monkeypatch.setattr(g, "SYNTHESIS_PROVIDER", "gemini")
+
+    state = _state(_baseline())
+    g.plan_step(state)
+    g.synthesize_step(state)
+
+    assert [c["prefer"] for c in router.calls] == ["groq", "gemini"]

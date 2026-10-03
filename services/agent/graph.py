@@ -18,6 +18,7 @@ from services.agent.guardrails import (
     redact_pii,
     validate_causal_graph_output,
 )
+from services.agent.actions import apply_action_guardrails, normalize_action, validate_action
 from services.agent.approval import post_approval_request, post_notification
 from services.agent.confidence import LOW_CONFIDENCE_THRESHOLD, apply_confidence_guardrails
 from services.agent.context import compact_steps, dumps_compact, system_context
@@ -32,7 +33,8 @@ from services.agent.persistence import (
     get_denial_notes_for_pattern,
     insert_trace_step,
 )
-from services.agent.structured import StructuredOutputError, complete_json
+from services.agent.schemas import SYNTHESIS_SCHEMA
+from services.agent.structured import StructuredOutputError, StructuredResult, complete_json
 from services.agent.tokens import get_or_issue_token
 from services.agent.tools import (
     BLAST_RADIUS,
@@ -56,6 +58,13 @@ MAX_LATENCY_MS_PER_INCIDENT = int(os.getenv("MAX_LATENCY_MS_PER_INCIDENT", "6000
 # Stop investigating after this many consecutive planner turns that produced
 # no new evidence (duplicate or invalid calls) instead of burning the step budget.
 MAX_CONSECUTIVE_NO_PROGRESS = int(os.getenv("MAX_CONSECUTIVE_NO_PROGRESS", "2"))
+# Optional provider routing (groq | gemini | openrouter). Planning is many small
+# calls and tolerates a cheaper model; synthesis is the one answer that matters.
+# If synthesis comes back unsure and an escalation provider is set, it is asked
+# once more there.
+PLANNER_PROVIDER = os.getenv("PLANNER_PROVIDER") or None
+SYNTHESIS_PROVIDER = os.getenv("SYNTHESIS_PROVIDER") or None
+SYNTHESIS_ESCALATION_PROVIDER = os.getenv("SYNTHESIS_ESCALATION_PROVIDER") or None
 SIMULATOR_BASE_URL = os.getenv("SIMULATOR_BASE_URL", "http://localhost:8100")
 
 
@@ -226,6 +235,21 @@ CONFIDENCE_GUIDANCE = (
     "disclosure in the trace), you cannot confirm what it would have shown: "
     "do not assert causes that depend on it, name the missing signal in "
     "confidence_rationale, and keep confidence below 0.5."
+)
+
+SYNTHESIS_EXAMPLES = (
+    "Worked examples -- follow their shape and calibration, do not copy their content:\n"
+    "Example A (a change caused it and the evidence agrees):\n"
+    '{"edges":[{"id":"e1","from":"deploy:rel-892","to":"mechanism:null_pointer_on_hot_path","evidence_tool_call_id":"1"},'
+    '{"id":"e2","from":"mechanism:null_pointer_on_hot_path","to":"symptom:error_rate_spike","evidence_tool_call_id":"3"}],'
+    '"confidence":0.9,"confidence_rationale":"Deploy rel-892 removed a null check; the first FATAL NullPointerException '
+    '(step 5) follows it by 1 min and the error-rate rise (step 3) matches.",'
+    '"recommended_action":{"action":"rollback_deploy","service":"inventory-service","rationale":"Revert rel-892."}}\n'
+    "Example B (looks like a blip, nothing to act on):\n"
+    '{"edges":[{"id":"e1","from":"transient:metric_blip","to":"symptom:latency_spike","evidence_tool_call_id":"3"}],'
+    '"confidence":0.3,"confidence_rationale":"One elevated reading that returned to baseline; no deploy and no error '
+    'logs, so there is not enough to claim a cause.",'
+    '"recommended_action":{"action":"none","service":null,"rationale":"Self-resolved; keep watching."}}'
 )
 
 # Back-compat alias: the extraction logic moved to services/agent/json_utils.py.
@@ -434,6 +458,7 @@ def plan_step(state: IncidentState) -> IncidentState:
             ),
             normalizer=_normalize_plan,
             validator=_make_plan_validator(has_evidence),
+            prefer=PLANNER_PROVIDER,
             incident_id=state["incident_id"],
             stage="plan_json",
         )
@@ -687,14 +712,14 @@ def _normalize_graph(graph: dict[str, Any]) -> dict[str, Any]:
             graph["confidence"] = float(graph["confidence"])
         except ValueError:
             pass
-    return normalize_graph(graph)
+    return normalize_action(normalize_graph(graph))
 
 
 def _validate_graph(graph: dict[str, Any]) -> Optional[str]:
     valid, error = validate_causal_graph_output(graph)
     if not valid:
         return error
-    return validate_graph_vocabulary(graph)
+    return validate_graph_vocabulary(graph) or validate_action(graph)
 
 
 def _resolve_citations(graph: dict[str, Any], steps_taken: list[dict[str, Any]]) -> list[str]:
@@ -745,6 +770,50 @@ def _abort_synthesis(
     return state
 
 
+def _synthesis_call(state: IncidentState, prompt: str, *, prefer: Optional[str], stage: str) -> StructuredResult:
+    return complete_json(
+        router,
+        prompt,
+        system=f"Cite evidence for every causal claim.\n{UNTRUSTED_INSTRUCTION}",
+        normalizer=_normalize_graph,
+        validator=_validate_graph,
+        json_schema=SYNTHESIS_SCHEMA,
+        prefer=prefer,
+        incident_id=state["incident_id"],
+        stage=stage,
+    )
+
+
+def _escalate_if_unsure(state: IncidentState, prompt: str, result: StructuredResult) -> StructuredResult:
+    """One re-ask on the stronger provider when the first answer is unsure.
+    Best effort: any failure keeps the first answer. Token usage is summed so
+    cost accounting includes both calls."""
+    target = SYNTHESIS_ESCALATION_PROVIDER
+    confidence = result.data.get("confidence")
+    if (
+        not target
+        or result.provider == target
+        or not isinstance(confidence, (int, float))
+        or confidence >= LOW_CONFIDENCE_THRESHOLD
+    ):
+        return result
+
+    log_stage(
+        "synthesize_step", state["incident_id"], "INFO",
+        action="escalating", from_provider=result.provider, to_provider=target, confidence=f"{confidence:.0%}",
+    )
+    try:
+        stronger = _synthesis_call(state, prompt, prefer=target, stage="synthesis_escalation")
+    except (ProviderError, StructuredOutputError):
+        return result
+
+    stronger.input_tokens += result.input_tokens
+    stronger.output_tokens += result.output_tokens
+    stronger.latency_ms += result.latency_ms
+    stronger.data["escalated_from"] = result.provider
+    return stronger
+
+
 def synthesize_step(state: IncidentState) -> IncidentState:
     """Produce the final causal graph, citing tool_call evidence for every
     edge. Unusable output (bad JSON, failed schema validation) is re-asked
@@ -758,23 +827,22 @@ def synthesize_step(state: IncidentState) -> IncidentState:
         '{"edges": [{"id": "...", "from": "...", "to": "...", '
         '"evidence_tool_call_id": "..."}], "confidence": 0.0-1.0, '
         '"confidence_rationale": "one or two sentences on what evidence '
-        'supports this confidence level, or what is missing/uncertain"}\n'
+        'supports this confidence level, or what is missing/uncertain", '
+        '"recommended_action": {"action": "none|restart_service|rollback_deploy", '
+        '"service": "<service name or null>", "rationale": "..."}}\n'
+        'Recommend an action only when the evidence supports it; use "none" when no safe '
+        'remediation is evident. "rollback_deploy" only when the root cause is a deploy, '
+        "config or flag change. A recommendation is advice for a human to approve, not an execution.\n"
         'Each edge\'s "evidence_tool_call_id" MUST be the "step" number, as a '
         'string (e.g. "3"), of the OBSERVATION that supports that edge.\n\n'
         f"{VOCABULARY_GUIDANCE}\n\n"
         f"{CONFIDENCE_GUIDANCE}\n\n"
+        f"{SYNTHESIS_EXAMPLES}\n\n"
         f"{STRICT_JSON_INSTRUCTION}"
     )
     try:
-        result = complete_json(
-            router,
-            prompt,
-            system=f"Cite evidence for every causal claim.\n{UNTRUSTED_INSTRUCTION}",
-            normalizer=_normalize_graph,
-            validator=_validate_graph,
-            incident_id=state["incident_id"],
-            stage="synthesis_json",
-        )
+        result = _synthesis_call(state, prompt, prefer=SYNTHESIS_PROVIDER, stage="synthesis_json")
+        result = _escalate_if_unsure(state, prompt, result)
     except ProviderError:
         log_stage("synthesize_step", state["incident_id"], "ABORT", reason="ProviderError")
         return _abort_synthesis(state, "all LLM providers failed")
@@ -834,6 +902,13 @@ def synthesize_step(state: IncidentState) -> IncidentState:
             model_confidence=f"{graph['confidence_capped_from']:.0%}", capped_to=f"{graph['confidence']:.0%}",
         )
 
+    graph = apply_action_guardrails(graph, state["steps_taken"])
+    if graph["recommended_action"].get("withheld_reason"):
+        log_stage(
+            "action_guard", state["incident_id"], "WARN",
+            withheld=graph["recommended_action"].get("original_action"), reason=graph["recommended_action"]["withheld_reason"][:90],
+        )
+
     state["causal_graph"] = graph
     state["confidence"] = graph.get("confidence", 0.0)
     confidence_rationale = graph.get("confidence_rationale", "")
@@ -864,6 +939,10 @@ def synthesize_step(state: IncidentState) -> IncidentState:
         for s in state["steps_taken"]
         if s["type"] == "plan"
     ]
+    recommended = graph["recommended_action"]
+    recommended_tool = recommended["action"] if recommended["action"] in MUTATING_TOOLS else None
+    if recommended_tool:
+        blast_radii.append(BLAST_RADIUS.get(recommended_tool, "none"))
     high_blast = any(b in ("medium", "high") for b in blast_radii)
     low_confidence = state["confidence"] < LOW_CONFIDENCE_THRESHOLD
     state["needs_approval"] = high_blast or low_confidence
@@ -892,7 +971,7 @@ def synthesize_step(state: IncidentState) -> IncidentState:
                 if s["type"] == "plan"
                 and BLAST_RADIUS.get(s["content"].get("tool", ""), "none") in ("medium", "high")
             ),
-            "investigation result (low confidence)",
+            recommended_tool or "investigation result (low confidence)",
         )
         risky_blast_radius = BLAST_RADIUS.get(risky_action, "low")
         pattern_key = compute_pattern_key(graph)
@@ -946,7 +1025,7 @@ def synthesize_step(state: IncidentState) -> IncidentState:
                 ],
                 confidence_rationale=rationale,
                 pattern_key=pattern_key,
-                service=primary_service,
+                service=(recommended.get("service") if recommended_tool else None) or primary_service,
             )
             log_stage("approval_request", state["incident_id"], "BLOCKED", action=risky_action, blast_radius=risky_blast_radius)
 

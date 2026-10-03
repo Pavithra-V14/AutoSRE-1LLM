@@ -112,6 +112,7 @@ def complete_json(
     max_attempts: Optional[int] = None,
     prefer: Optional[str] = None,
     temperature: Optional[float] = None,
+    json_schema: Optional[dict[str, Any]] = None,
     incident_id: str = "-",
     stage: str = "llm_json",
 ) -> StructuredResult:
@@ -132,6 +133,8 @@ def complete_json(
             kwargs["prefer"] = prefer
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if json_schema is not None:
+            kwargs["json_schema"] = json_schema
         if bad_providers:
             # A provider that just produced unusable output is unlikely to
             # fix it on an identical re-ask -- try someone else first.

@@ -32,6 +32,8 @@ MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "4096"))
 # same evidence should produce the same conclusion. Providers' own defaults
 # (~1.0) were a measurable source of run-to-run variance.
 DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+# Schema-constrained decoding where supported (set false to force plain JSON mode).
+STRUCTURED_OUTPUT_ENABLED = os.getenv("LLM_STRUCTURED_OUTPUT", "true").strip().lower() != "false"
 LLM_RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("LLM_RATE_LIMIT_COOLDOWN_SECONDS", "60"))
 LLM_QUOTA_COOLDOWN_SECONDS = int(os.getenv("LLM_QUOTA_COOLDOWN_SECONDS", "3600"))
 LLM_OVERSIZED_COOLDOWN_SECONDS = int(os.getenv("LLM_OVERSIZED_COOLDOWN_SECONDS", "86400"))
@@ -127,6 +129,7 @@ class LLMRouter:
         prefer: Optional[str] = None,
         demote: Iterable[str] = (),
         temperature: Optional[float] = None,
+        json_schema: Optional[dict] = None,
     ) -> LLMResponse:
         """json_mode asks the provider to constrain output to a single JSON
         object (Groq response_format, Gemini response_mime_type). OpenRouter
@@ -138,7 +141,10 @@ class LLMRouter:
         `demote` moves providers to the back of the order -- used when a
         provider just returned unusable output (e.g. a free routed model
         answering with a safety-classifier verdict instead of JSON).
-        `temperature` overrides LLM_TEMPERATURE for this call."""
+        `temperature` overrides LLM_TEMPERATURE for this call.
+        `json_schema` ({"name", "schema"}) asks for schema-constrained
+        decoding where the provider supports it (Groq); other providers fall
+        back to plain JSON mode, so callers must still validate."""
         resolved_temperature = DEFAULT_TEMPERATURE if temperature is None else temperature
         errors = []
         for fn in self._provider_chain(prefer, demote):
@@ -154,7 +160,8 @@ class LLMRouter:
                 continue
 
             try:
-                resp = fn(prompt, system, json_mode, resolved_temperature)
+                extra = {"json_schema": json_schema} if json_schema else {}
+                resp = fn(prompt, system, json_mode, resolved_temperature, **extra)
                 _record_success(provider_name)
                 log_stage(
                     "llm_provider", "-", "OK", provider=provider_name, model=resp.model,
@@ -181,16 +188,21 @@ class LLMRouter:
             f"All providers failed or are unconfigured: {'; '.join(errors)}"
         )
 
-    def _try_groq(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
+    def _try_groq(
+        self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0,
+        json_schema: Optional[dict] = None,
+    ) -> LLMResponse:
         if not self.groq_key:
             raise ProviderError("groq: no API key configured")
         from groq import Groq
 
         start = time.time()
         client = Groq(api_key=self.groq_key)
-        extra: dict = {"response_format": {"type": "json_object"}} if json_mode else {}
-        try:
-            resp = client.chat.completions.create(
+        use_schema = bool(json_schema) and STRUCTURED_OUTPUT_ENABLED
+
+        def _create(response_format: Optional[dict]):
+            extra: dict = {"response_format": response_format} if response_format else {}
+            return client.chat.completions.create(
                 model=self.groq_model,
                 messages=[
                     {"role": "system", "content": system},
@@ -200,7 +212,31 @@ class LLMRouter:
                 temperature=temperature,
                 **extra,
             )
-        except Exception as e: 
+
+        if use_schema:
+            response_format: Optional[dict] = {
+                "type": "json_schema",
+                "json_schema": {"name": json_schema["name"], "schema": json_schema["schema"], "strict": True},
+            }
+        else:
+            response_format = {"type": "json_object"} if json_mode else None
+
+        try:
+            try:
+                resp = _create(response_format)
+            except Exception as e:
+                # A model/account that rejects schema decoding must degrade to
+                # plain JSON mode, not fail the call. Only schema-shaped 400s
+                # qualify; rate limits and outages still raise.
+                text = str(e).lower()
+                schema_rejected = use_schema and "400" in text and any(
+                    k in text for k in ("response_format", "json_schema", "schema", "strict")
+                )
+                if not schema_rejected:
+                    raise
+                log_stage("llm_provider", "-", "WARN", provider="groq", reason="schema output rejected -- using json_object")
+                resp = _create({"type": "json_object"})
+        except Exception as e:
             raise ProviderError(f"groq: {e}")
 
         latency_ms = int((time.time() - start) * 1000)
@@ -214,7 +250,10 @@ class LLMRouter:
             finish_reason=resp.choices[0].finish_reason or "unknown",
         )
 
-    def _try_gemini(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
+    def _try_gemini(
+        self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0,
+        json_schema: Optional[dict] = None,
+    ) -> LLMResponse:
         if not self.gemini_key:
             raise ProviderError("gemini: no API key configured")
 
@@ -254,7 +293,10 @@ class LLMRouter:
             finish_reason=finish_reason,
         )
 
-    def _try_openrouter(self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0) -> LLMResponse:
+    def _try_openrouter(
+        self, prompt: str, system: str, json_mode: bool = False, temperature: float = 0.0,
+        json_schema: Optional[dict] = None,
+    ) -> LLMResponse:
         if not self.openrouter_key:
             raise ProviderError("openrouter: no API key configured")
 

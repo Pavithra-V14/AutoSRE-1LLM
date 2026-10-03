@@ -91,7 +91,7 @@ def test_param_the_tool_ignores_does_not_make_a_call_new(fake_executor):
 
 
 def test_supported_param_change_is_a_new_call(fake_executor):
-    steps = _baseline() + [plan("get_logs", {"since": "2026-10-03T16:00:00Z"})]
+    steps = [plan("get_logs", {"since": "2026-10-03T16:00:00Z"})]  # nothing fetched yet -> genuinely new
     state = g.act_step(_state(steps))
 
     assert state["steps_taken"][-1]["content"]["status"] == "ok"
@@ -99,7 +99,7 @@ def test_supported_param_change_is_a_new_call(fake_executor):
 
 
 def test_only_honored_params_reach_the_executor(fake_executor):
-    steps = _baseline() + [plan("get_logs", {"service": "checkout-service", "tail": 50, "incident_id": "other"})]
+    steps = [plan("get_logs", {"service": "checkout-service", "tail": 50, "incident_id": "other"})]
     g.act_step(_state(steps))
 
     sent = fake_executor.requests[0]
@@ -367,7 +367,7 @@ def test_secrets_are_redacted_before_they_reach_state_or_trace():
 
 def test_act_step_stores_the_sanitized_observation_in_state_and_trace(isolate, fake_executor):
     fake_executor.result = _result_with_log("email me at oncall@example.com")
-    state = g.act_step(_state(_baseline() + [plan("get_logs", {"since": "2026-10-03T16:00:00Z"})]))
+    state = g.act_step(_state([plan("get_logs", {"since": "2026-10-03T16:00:00Z"})]))
 
     stored = state["steps_taken"][-1]["content"]["data"]["logs"][0]["message"]
     traced = isolate[-1]["content"]["data"]["logs"][0]["message"]
@@ -398,3 +398,68 @@ def test_flagged_injection_fails_the_run_closed(monkeypatch):
     assert state["confidence"] < g.LOW_CONFIDENCE_THRESHOLD
     assert state["needs_approval"] is True
     assert "prompt injection" in state["causal_graph"]["confidence_rationale"]
+
+
+# --- covered calls and budget ------------------------------------------------------------------------------------
+
+def test_time_filtered_refetch_of_data_already_returned_is_skipped(fake_executor):
+    """get_logs(since=T) can only return a subset of get_logs(); the planner
+    spent steps on exactly this."""
+    steps = _baseline() + [plan("get_logs", {"since": "2026-10-03T16:00:00Z"})]
+    state = g.act_step(_state(steps))
+
+    last = state["steps_taken"][-1]["content"]
+    assert last["status"] == "duplicate_call_skipped"
+    assert "narrower" in last["disclosure"]
+    assert fake_executor.requests == []
+
+
+def test_service_filtered_refetch_is_covered_by_an_unfiltered_call(fake_executor):
+    steps = _baseline() + [plan("get_metrics", {"service": "checkout-service"})]
+    assert g.act_step(_state(steps))["steps_taken"][-1]["content"]["status"] == "duplicate_call_skipped"
+
+
+def test_a_broader_call_is_not_covered_by_a_narrower_one(fake_executor):
+    steps = [plan("get_logs", {"service": "checkout-service"}), observation("get_logs"), plan("get_logs", {})]
+    assert g.act_step(_state(steps))["steps_taken"][-1]["content"]["status"] == "ok"
+
+
+def test_an_earlier_time_filtered_result_does_not_cover_other_windows(fake_executor):
+    steps = [plan("get_logs", {"since": "2026-10-03T16:00:00Z"}), observation("get_logs"),
+             plan("get_logs", {"since": "2026-10-03T15:00:00Z"})]
+    assert g.act_step(_state(steps))["steps_taken"][-1]["content"]["status"] == "ok"
+
+
+def test_a_failed_earlier_call_does_not_cover_a_retry(fake_executor):
+    steps = [plan("get_logs", {}), observation("get_logs", "unreachable"), plan("get_logs", {"since": "x"})]
+    assert g.act_step(_state(steps))["steps_taken"][-1]["content"]["status"] == "ok"
+
+
+def test_remediation_tools_are_never_treated_as_covered(fake_executor):
+    steps = [plan("restart_service", {"service": "a"}), observation("restart_service"),
+             plan("restart_service", {"service": "a", "since": "x"})]
+    assert g._covering_call_index(steps, "restart_service", {"service": "a"}) is None
+
+
+def test_exhausted_tool_budget_concludes_instead_of_crashing(monkeypatch, isolate):
+    from services.agent.tools import BudgetExceeded
+
+    class Exploding:
+        def execute(self, request):
+            raise BudgetExceeded("incident inc-1 exceeded 8 tool calls")
+
+    monkeypatch.setattr(g, "executor", Exploding())
+    state = g.act_step(_state([plan("get_logs", {"since": "fresh"})]))
+
+    assert state["done"] is True
+    obs = state["steps_taken"][-1]["content"]
+    assert obs["status"] == "budget_exceeded" and "budget" in obs["disclosure"]
+    assert isolate[-1]["status"] == "budget_exceeded"
+
+
+def test_executor_budget_is_configurable(monkeypatch):
+    from services.agent.tools import ToolExecutor
+
+    monkeypatch.setenv("MAX_TOOL_CALLS_PER_INCIDENT", "3")
+    assert ToolExecutor().max_calls_per_incident == 3
+    assert ToolExecutor(max_calls_per_incident=5).max_calls_per_incident == 5

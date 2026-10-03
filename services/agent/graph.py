@@ -34,6 +34,7 @@ from services.agent.structured import StructuredOutputError, complete_json
 from services.agent.tokens import get_or_issue_token
 from services.agent.tools import (
     BLAST_RADIUS,
+    BudgetExceeded,
     MUTATING_TOOLS,
     ToolCallRequest,
     ToolExecutor,
@@ -489,6 +490,34 @@ def plan_step(state: IncidentState) -> IncidentState:
     return state
 
 
+_READ_ONLY_TOOLS = ("get_metrics", "get_logs", "get_deploy_history")
+
+
+def _covering_call_index(steps_taken: list[dict[str, Any]], tool: str, params: dict[str, Any]) -> Optional[int]:
+    """Index of an earlier SUCCESSFUL call whose result already contains
+    everything this (the last) plan could return.
+
+    `since` and `service` only ever narrow a result, so a filtered call is a
+    subset of an earlier unfiltered one: get_logs(since=T) cannot return
+    anything get_logs() did not. Re-fetching it spends a step to learn
+    nothing -- the planner did exactly that on most runs that used 10 steps."""
+    if tool not in _READ_ONLY_TOOLS:
+        return None
+    want = canonical_params(tool, params)
+    for i, step in enumerate(steps_taken[:-1]):
+        if step["type"] != "plan" or step["content"].get("tool") != tool:
+            continue
+        following = steps_taken[i + 1] if i + 1 < len(steps_taken) - 1 else None
+        if not following or following["type"] != "observation" or following["content"].get("status") != "ok":
+            continue
+        have = canonical_params(tool, step["content"].get("params") or {})
+        if "since" in have:
+            continue  # an earlier time-filtered result does not cover other windows
+        if have.get("service") in (None, want.get("service")):
+            return i
+    return None
+
+
 def act_step(state: IncidentState) -> IncidentState:
     if state["done"] or not state["steps_taken"]:
         return state
@@ -506,6 +535,10 @@ def act_step(state: IncidentState) -> IncidentState:
         ),
         None,
     )
+    covered_by: Optional[int] = None
+    if duplicate_index is None:
+        covered_by = _covering_call_index(state["steps_taken"], str(last_plan.get("tool")), last_plan.get("params") or {})
+        duplicate_index = covered_by
     if duplicate_index is not None:
         dup_result = {
             "tool": last_plan.get("tool"),
@@ -513,7 +546,10 @@ def act_step(state: IncidentState) -> IncidentState:
             "status": "duplicate_call_skipped",
             "data": None,
             "disclosure": (
-                f"identical call already made at step {duplicate_index} -- "
+                f"step {duplicate_index} already returned everything this narrower call could "
+                "(filters only subset a result) -- not re-fetching, see that step's observation"
+                if covered_by is not None
+                else f"identical call already made at step {duplicate_index} -- "
                 "not re-fetching, see that step's observation for the data"
             ),
         }
@@ -563,7 +599,30 @@ def act_step(state: IncidentState) -> IncidentState:
         )
         return state
 
-    result = executor.execute(request)
+    try:
+        result = executor.execute(request)
+    except BudgetExceeded as e:
+        # A hard per-incident tool-call ceiling is a stop condition, not a
+        # crash: record it and conclude with the evidence already gathered.
+        over_budget = {
+            "tool": last_plan.get("tool"),
+            "role": last_plan.get("role"),
+            "status": "budget_exceeded",
+            "data": None,
+            "disclosure": f"tool-call budget exhausted ({e}); concluding with evidence gathered so far",
+        }
+        state["steps_taken"].append({"type": "observation", "content": over_budget})
+        insert_trace_step(
+            incident_id=state["incident_id"],
+            step_index=len(state["steps_taken"]) - 1,
+            step_type="observation",
+            content=over_budget,
+            tool=over_budget["tool"],
+            status="budget_exceeded",
+        )
+        state["done"] = True
+        log_stage("act_step", state["incident_id"], "WARN", reason="tool-call budget exhausted", error=str(e)[:80])
+        return state
     observation = _observation_from_result(state["incident_id"], result)
     state["steps_taken"].append({"type": "observation", "content": observation})
 

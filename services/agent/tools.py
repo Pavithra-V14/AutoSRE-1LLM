@@ -115,8 +115,12 @@ class ToolExecutor:
     application logic, makes the disallowed action impossible.
     """
 
-    def __init__(self, max_calls_per_incident: int = 8, agent_role: str = "investigator"):
-        self.max_calls_per_incident = max_calls_per_incident
+    def __init__(self, max_calls_per_incident: Optional[int] = None, agent_role: str = "investigator"):
+        self.max_calls_per_incident = (
+            max_calls_per_incident
+            if max_calls_per_incident is not None
+            else int(os.getenv("MAX_TOOL_CALLS_PER_INCIDENT", "8"))
+        )
         self.agent_role = agent_role
         self._call_counts: dict[str, int] = {}
 

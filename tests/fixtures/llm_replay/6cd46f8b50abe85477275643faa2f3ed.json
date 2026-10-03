@@ -1,0 +1,14 @@
+{
+  "key": "6cd46f8b50abe85477275643faa2f3ed",
+  "recorded_at": "2026-10-03T22:19:35",
+  "prompt_preview": "Grading rubric. Two things decide correctness: (1) the ROOT CAUSE -- the originating trigger (a specific deploy/config change, an external outage, a traffic event, ...) and (2) the MECHANISM -- how th",
+  "response": {
+    "text": "{\"verdict\":\"correct\",\"score\":1.0,\"rationale\":\"The agent correctly identifies the payment gateway outage as the root cause and upstream timeout as the mechanism; stopping at latency and error‑rate spikes is acceptable as user‑visible symptoms.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 731,
+    "output_tokens": 360,
+    "latency_ms": 11068,
+    "finish_reason": "stop"
+  }
+}

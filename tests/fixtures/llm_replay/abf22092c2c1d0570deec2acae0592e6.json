@@ -1,0 +1,14 @@
+{
+  "key": "abf22092c2c1d0570deec2acae0592e6",
+  "recorded_at": "2026-10-03T22:14:46",
+  "prompt_preview": "Grading rubric. Two things decide correctness: (1) the ROOT CAUSE -- the originating trigger (a specific deploy/config change, an external outage, a traffic event, ...) and (2) the MECHANISM -- how th",
+  "response": {
+    "text": "{\"verdict\":\"correct\",\"score\":1.0,\"rationale\":\"The agent names the same config change (cfg-4471) as the root cause and correctly identifies connection‑pool exhaustion as the mechanism leading to the latency spike; extra symptom detail does not affect correctness.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 756,
+    "output_tokens": 259,
+    "latency_ms": 1287,
+    "finish_reason": "stop"
+  }
+}

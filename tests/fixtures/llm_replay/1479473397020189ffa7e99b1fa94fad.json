@@ -1,0 +1,14 @@
+{
+  "key": "1479473397020189ffa7e99b1fa94fad",
+  "recorded_at": "2026-10-03T22:15:32",
+  "prompt_preview": "Grading rubric. Two things decide correctness: (1) the ROOT CAUSE -- the originating trigger (a specific deploy/config change, an external outage, a traffic event, ...) and (2) the MECHANISM -- how th",
+  "response": {
+    "text": "{\"verdict\":\"correct\",\"score\":1.0,\"rationale\":\"The agent names the same deploy as the root cause and links it to a null‑pointer mechanism, which corresponds to the ground‑truth null_check_removed leading to a crash loop; the symptoms provided are acceptable.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 742,
+    "output_tokens": 324,
+    "latency_ms": 4305,
+    "finish_reason": "stop"
+  }
+}

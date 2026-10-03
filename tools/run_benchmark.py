@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -10,14 +11,21 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from services.agent.benchmark_stats import status_counts, summarize_scenarios, wilson_interval
+from services.agent.benchmark_stats import (
+    DEFAULT_MAX_DROP,
+    compare_to_baseline,
+    results_payload,
+    status_counts,
+    summarize_scenarios,
+    wilson_interval,
+)
 from services.agent.evaluation import RunEvaluation, aggregate_metrics, evaluate_run
 from services.agent.graph import run_incident, ScenarioInjectionError
 from services.agent.judge import CausalGraphJudge
 from services.agent.persistence import compute_equivalent_cost_usd, insert_benchmark_run
 from services.agent.scoring import score_against_ground_truth, score_run  # noqa: F401 (score_against_ground_truth re-exported for callers of the old scorer)
 from services.agent.trust import compute_pattern_key, record_benchmark_outcome
-from services.simulator.scenarios import SCENARIOS
+from services.simulator.scenarios import SCENARIOS, SMOKE_SCENARIOS
 import os
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -109,6 +117,17 @@ def main() -> None:
                          help="run each scenario N times and report per-scenario pass rate, a 95%% "
                               "confidence interval and which scenarios are flaky (default 1; the "
                               "--min-success-rate gate then applies to the pass rate over ALL runs)")
+    parser.add_argument("--smoke", action="store_true",
+                         help="run only the small SMOKE_SCENARIOS subset (fast; for PR checks)")
+    parser.add_argument("--output", default=None, help="write machine-readable results (JSON) to this path")
+    parser.add_argument("--save-baseline", default=None,
+                         help="write this run's results as a baseline file (commit it once you trust the numbers)")
+    parser.add_argument("--baseline", default=None,
+                         help="compare against a saved baseline and exit 1 on a regression; a missing file "
+                              "is a notice, not an error (first run)")
+    parser.add_argument("--max-drop", type=float, default=DEFAULT_MAX_DROP,
+                         help="largest per-scenario pass-rate drop vs the baseline that still counts as noise "
+                              f"(default {DEFAULT_MAX_DROP}: one flaky failure in 3 runs)")
     parser.add_argument("--no-judge", action="store_true",
                          help="grade with the legacy word-overlap scorer instead of the LLM judge "
                               "(offline / no extra LLM calls; negative scenarios are still scored on their flags)")
@@ -117,11 +136,14 @@ def main() -> None:
         parser.error("--runs must be at least 1")
     judge = None if args.no_judge else CausalGraphJudge()
 
-    scenarios = (
-        {args.scenario: SCENARIOS[args.scenario]}
-        if args.scenario
-        else SCENARIOS
-    )
+    if args.scenario and args.smoke:
+        parser.error("--scenario and --smoke are mutually exclusive")
+    if args.scenario:
+        scenarios = {args.scenario: SCENARIOS[args.scenario]}
+    elif args.smoke:
+        scenarios = {name: SCENARIOS[name] for name in SMOKE_SCENARIOS}
+    else:
+        scenarios = SCENARIOS
 
     run_id = str(uuid.uuid4())
     results = []
@@ -199,8 +221,8 @@ def main() -> None:
     print(f"5. Cost per task completion:    {completion_cost_str}")
     print("=" * 60)
 
+    stats = summarize_scenarios(results)
     if args.runs > 1:
-        stats = summarize_scenarios(results)
         print("\nPer-scenario stability (" + f"{args.runs} runs each):")
         for item in sorted(stats, key=lambda x: (x.pass_rate, x.scenario)):
             print(f"  {item.passes}/{item.runs}  {item.status:<12s} mean_score={item.mean_score:.2f}  {item.scenario}")
@@ -238,11 +260,57 @@ def main() -> None:
         "read-only investigative tools only, remediation actions excluded."
     )
 
+    payload = results_payload(stats, args.runs)
+    for path, label in ((args.output, "results"), (args.save_baseline, "baseline")):
+        if path:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            print(f"\nWrote {label} to {target}")
+
+    failed = False
+
+    if args.baseline:
+        baseline_path = Path(args.baseline)
+        if not baseline_path.exists():
+            print(
+                f"\nNOTICE: no baseline at {baseline_path} -- nothing to compare against. "
+                "Re-run with --save-baseline once you trust these numbers."
+            )
+        else:
+            if args.runs < 3:
+                print(
+                    f"\nNOTE: comparing {args.runs} run(s) per scenario to a baseline is noisy; "
+                    "use --runs 3 or more for a trustworthy gate."
+                )
+            comparison = compare_to_baseline(stats, json.loads(baseline_path.read_text(encoding="utf-8")), args.max_drop)
+            print(
+                f"\nBaseline comparison ({baseline_path}): current {comparison.current_rate:.1%} "
+                f"(95% CI {comparison.current_ci[0]:.0%}-{comparison.current_ci[1]:.0%}) vs baseline "
+                f"{comparison.baseline_rate:.1%} over the shared scenarios"
+            )
+            for name, was, now in comparison.regressions:
+                print(f"  REGRESSION  {name}: pass rate {was:.0%} -> {now:.0%}")
+            for name, was, now in comparison.improvements:
+                print(f"  improved    {name}: pass rate {was:.0%} -> {now:.0%}")
+            if comparison.new_scenarios:
+                print(f"  new (no baseline yet): {', '.join(comparison.new_scenarios)}")
+            if comparison.missing_scenarios:
+                print(f"  not run this time: {len(comparison.missing_scenarios)} scenario(s) from the baseline")
+            if comparison.overall_regressed:
+                print("  REGRESSION  overall: the drop is larger than run-to-run noise at this sample size")
+            if comparison.failed:
+                print("\nFAIL: regression against the baseline.")
+                failed = True
+
     if args.min_success_rate is not None and success_rate < args.min_success_rate:
         print(
             f"\nFAIL: success rate {success_rate:.1%} is below the "
             f"required {args.min_success_rate:.1%} threshold."
         )
+        failed = True
+
+    if failed:
         sys.exit(1)
 
 

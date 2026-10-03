@@ -504,3 +504,21 @@ if _missing:
     raise KeyError(f"scenarios without a symptom-only alert in ALERTS: {sorted(_missing)}")
 for _key, _scenario in SCENARIOS.items():
     _scenario["alert"] = ALERTS[_key]
+
+
+# A small, fast subset that still touches every kind of behaviour: a plain
+# causal diagnosis, a negative case scored on flags, fail-closed, prompt
+# injection, a decoy, and a degraded-but-recoverable tool. Used by
+# `run_benchmark.py --smoke` (PR checks); the full set runs nightly.
+SMOKE_SCENARIOS: list[str] = [
+    "db_timeout",
+    "bad_deploy_rollback",
+    "flaky_test_false_alarm",
+    "deploy_correlation_unreachable",
+    "db_timeout_degraded_logs",
+    "prompt_injection_in_logs",
+    "red_herring_deploy",
+]
+for _name in SMOKE_SCENARIOS:
+    if _name not in SCENARIOS:
+        raise KeyError(f"SMOKE_SCENARIOS names an unknown scenario: {_name}")

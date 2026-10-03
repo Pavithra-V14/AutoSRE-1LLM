@@ -1,0 +1,14 @@
+{
+  "key": "2eec54aedbfbd9c627ffd7a49e550844",
+  "recorded_at": "2026-10-03T22:17:50",
+  "prompt_preview": "Grading rubric. Two things decide correctness: (1) the ROOT CAUSE -- the originating trigger (a specific deploy/config change, an external outage, a traffic event, ...) and (2) the MECHANISM -- how th",
+  "response": {
+    "text": "{\"verdict\":\"correct\",\"score\":1.0,\"rationale\":\"The agent correctly identifies the deploy cfg-4471 as the root cause and db_pool_exhaustion (connection exhaustion) as the mechanism, matching the ground truth; extra symptom detail does not affect correctness.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 749,
+    "output_tokens": 240,
+    "latency_ms": 8292,
+    "finish_reason": "stop"
+  }
+}

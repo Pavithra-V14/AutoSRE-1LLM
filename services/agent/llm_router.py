@@ -146,6 +146,21 @@ class LLMRouter:
         decoding where the provider supports it (Groq); other providers fall
         back to plain JSON mode, so callers must still validate."""
         resolved_temperature = DEFAULT_TEMPERATURE if temperature is None else temperature
+
+        # Record/replay (see services/agent/llm_replay.py). Imported here
+        # because that module imports this one.
+        from services.agent import llm_replay
+
+        replay_mode = llm_replay.mode()
+        replay_key = (
+            llm_replay.request_key(prompt, system, json_mode, resolved_temperature, json_schema)
+            if replay_mode != "off"
+            else ""
+        )
+        if replay_mode == "replay":
+            recorded = llm_replay.lookup(replay_key, prompt)
+            log_stage("llm_provider", "-", "OK", provider=recorded.provider, model=recorded.model, source="replay")
+            return recorded
         errors = []
         for fn in self._provider_chain(prefer, demote):
             provider_name = fn.__name__.replace("_try_", "")
@@ -173,6 +188,8 @@ class LLMRouter:
                         reason="response truncated (finish_reason=length) -- "
                         "raise LLM_MAX_OUTPUT_TOKENS if this recurs",
                     )
+                if replay_mode == "record":
+                    llm_replay.store(replay_key, prompt, resp)
                 return resp
             except ProviderError as e:
                 failure_class, base_cooldown = _classify_failure(str(e))

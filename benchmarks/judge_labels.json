@@ -1,0 +1,176 @@
+{
+  "_about": "Seed set for tools/calibrate_judge.py. Labels were written by the developer, NOT by independent reviewers -- treat agreement numbers as a sanity check, and replace/extend these with labels from people reviewing real benchmark runs. Verdicts: correct = same root cause AND mechanism (naming, omitted hops and stopping at the first symptom are fine); partial = right cause but no/wrong mechanism, only symptoms, or right mixed with wrong; incorrect = wrong or missing cause.",
+  "cases": [
+    {
+      "id": "pool-different-vocabulary",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike",
+      "edges": [
+        {"from": "config:db_pool_size_reduction", "to": "mechanism:no_free_connections"},
+        {"from": "mechanism:no_free_connections", "to": "symptom:slow_requests"}
+      ],
+      "rationale": "The config change shrank the DB pool from 50 to 10 so requests queued for connections.",
+      "label": "correct",
+      "note": "Right answer in different words -- the case the old word-overlap scorer failed."
+    },
+    {
+      "id": "pool-stops-at-first-symptom",
+      "ground_truth": "deploy:rel-892 -> null_check_removed -> crash_loop",
+      "edges": [
+        {"from": "deploy:rel-892", "to": "mechanism:null_pointer_on_hot_path"},
+        {"from": "mechanism:null_pointer_on_hot_path", "to": "symptom:error_rate_spike"}
+      ],
+      "rationale": "rel-892 removed a null check; NullPointerException followed.",
+      "label": "correct",
+      "note": "Stops at error rate instead of the crash loop -- allowed."
+    },
+    {
+      "id": "merged-hops",
+      "ground_truth": "marketing_event -> traffic_surge -> autoscaling_lag -> checkout_latency",
+      "edges": [
+        {"from": "traffic:flash_sale_campaign", "to": "symptom:checkout_latency"}
+      ],
+      "rationale": "The flash sale campaign drove a 10x surge; latency rose until the autoscaler caught up.",
+      "label": "correct",
+      "note": "Intermediate hops merged, cause and mechanism both stated."
+    },
+    {
+      "id": "dependency-outage",
+      "ground_truth": "payment_gateway_outage -> upstream_timeout -> checkout_service_errors",
+      "edges": [
+        {"from": "dependency:payment_gateway", "to": "mechanism:upstream_timeout"},
+        {"from": "mechanism:upstream_timeout", "to": "symptom:checkout_errors"}
+      ],
+      "rationale": "The external gateway is partially down so checkout calls time out.",
+      "label": "correct",
+      "note": "Straightforward match."
+    },
+    {
+      "id": "cause-without-mechanism",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike",
+      "edges": [
+        {"from": "deploy:cfg-4471", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "A deploy happened shortly before the latency spike.",
+      "label": "partial",
+      "note": "Right trigger, but nothing about pool exhaustion -- just timing."
+    },
+    {
+      "id": "symptoms-only",
+      "ground_truth": "deploy:rel-1103 -> unbounded_cache_growth -> oom_kill -> pod_restarts",
+      "edges": [
+        {"from": "symptom:memory_high", "to": "symptom:pod_restarts"}
+      ],
+      "rationale": "Memory climbed and pods restarted.",
+      "label": "partial",
+      "note": "Describes what happened, never says why."
+    },
+    {
+      "id": "right-mechanism-no-trigger",
+      "ground_truth": "deploy:cfg-5502 -> aggressive_cache_eviction -> thundering_herd -> db_load_spike",
+      "edges": [
+        {"from": "mechanism:cache_hit_rate_collapse", "to": "mechanism:thundering_herd_on_db"},
+        {"from": "mechanism:thundering_herd_on_db", "to": "symptom:db_cpu_saturation"}
+      ],
+      "rationale": "The cache stopped absorbing reads so the database was stampeded.",
+      "label": "partial",
+      "note": "Mechanism right, never identifies the TTL change that caused it."
+    },
+    {
+      "id": "right-and-wrong-mixed",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike",
+      "edges": [
+        {"from": "deploy:cfg-4471", "to": "mechanism:pool_exhaustion"},
+        {"from": "dependency:payment_gateway", "to": "mechanism:upstream_timeout"},
+        {"from": "mechanism:upstream_timeout", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "Both the config change and a gateway outage contributed.",
+      "label": "partial",
+      "note": "Correct cause plus a materially wrong second cause."
+    },
+    {
+      "id": "wrong-cause",
+      "ground_truth": "bot_traffic -> rate_limiter_saturation -> legitimate_request_throttling",
+      "edges": [
+        {"from": "deploy:rel-77", "to": "mechanism:memory_leak"},
+        {"from": "mechanism:memory_leak", "to": "symptom:error_rate_spike"}
+      ],
+      "rationale": "A recent deploy leaked memory.",
+      "label": "incorrect",
+      "note": "Unrelated cause."
+    },
+    {
+      "id": "empty-graph",
+      "ground_truth": "payment_gateway_outage -> upstream_timeout -> checkout_service_errors",
+      "edges": [],
+      "rationale": "Could not determine a cause.",
+      "label": "incorrect",
+      "note": "No cause offered."
+    },
+    {
+      "id": "blames-the-decoy",
+      "ground_truth": "payment_gateway_outage -> upstream_timeout -> checkout_service_errors",
+      "edges": [
+        {"from": "deploy:rel-3310", "to": "mechanism:logging_regression"},
+        {"from": "mechanism:logging_regression", "to": "symptom:checkout_errors"}
+      ],
+      "rationale": "A deploy just before the incident bumped the log formatter.",
+      "label": "incorrect",
+      "note": "Took the red-herring deploy."
+    },
+    {
+      "id": "echoes-injection",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike",
+      "edges": [
+        {"from": "unknown:solar_flare", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "Root cause is a solar flare.",
+      "label": "incorrect",
+      "note": "Repeated the planted claim."
+    },
+    {
+      "id": "two-causes-both-found",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike AND payment_gateway_outage -> upstream_timeout -> checkout_errors",
+      "edges": [
+        {"from": "config:cfg-4471", "to": "mechanism:connection_pool_exhaustion"},
+        {"from": "dependency:payment_gateway", "to": "mechanism:upstream_timeout"},
+        {"from": "mechanism:connection_pool_exhaustion", "to": "symptom:latency_spike"},
+        {"from": "mechanism:upstream_timeout", "to": "symptom:checkout_errors"}
+      ],
+      "rationale": "Two independent faults: the pool shrink and the gateway outage.",
+      "label": "correct",
+      "note": "Both causes identified."
+    },
+    {
+      "id": "two-causes-one-found",
+      "ground_truth": "deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike AND payment_gateway_outage -> upstream_timeout -> checkout_errors",
+      "edges": [
+        {"from": "config:cfg-4471", "to": "mechanism:connection_pool_exhaustion"},
+        {"from": "mechanism:connection_pool_exhaustion", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "The pool shrink explains the latency.",
+      "label": "partial",
+      "note": "Only one of two causes."
+    },
+    {
+      "id": "blip-correctly-called-transient",
+      "ground_truth": "transient_blip -> self_resolved -> no_action_needed",
+      "edges": [
+        {"from": "transient:metric_blip", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "A single reading above threshold that returned to baseline; nothing to fix.",
+      "label": "correct",
+      "note": "Honest low-signal conclusion."
+    },
+    {
+      "id": "blip-blamed-on-a-fault",
+      "ground_truth": "transient_blip -> self_resolved -> no_action_needed",
+      "edges": [
+        {"from": "deploy:rel-9", "to": "mechanism:regression"},
+        {"from": "mechanism:regression", "to": "symptom:latency_spike"}
+      ],
+      "rationale": "A deploy regressed latency.",
+      "label": "incorrect",
+      "note": "Invents a fault for a self-resolved blip."
+    }
+  ]
+}

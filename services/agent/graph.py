@@ -49,7 +49,7 @@ from services.agent.tools import (
 from typing import get_args
 TOOL_NAMES = get_args(ToolCallRequest.model_fields["tool"].annotation)
 from services.agent.trust import compute_pattern_key, evaluate_trust, record_auto_approval
-from services.agent.untrusted import UNTRUSTED_INSTRUCTION, sanitize, wrap_untrusted
+from services.agent.untrusted import PII_ENTITIES, UNTRUSTED_INSTRUCTION, sanitize, wrap_untrusted
 from services.agent.vocabulary import VOCABULARY_GUIDANCE, normalize_graph, validate_graph_vocabulary
 
 MAX_STEPS = 8
@@ -429,7 +429,7 @@ def plan_step(state: IncidentState) -> IncidentState:
         else ""
     )
     prompt = (
-        f"Incident alert: {redact_pii(state['alert_text'])}\n\n"
+        f"Incident alert: {redact_pii(state['alert_text'], entities=PII_ENTITIES)}\n\n"
         f"{TOOL_REFERENCE}\n\n"
         f"{system_context(state['alert_text'], state['steps_taken'])}\n\n"
         f"Calls already made (re-requesting any of these returns identical "

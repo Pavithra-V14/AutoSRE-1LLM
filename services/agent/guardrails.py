@@ -51,14 +51,21 @@ def _get_presidio_engines() -> tuple[Optional[Any], Optional[Any]]:
         return (None, None)
     import logging
     logging.getLogger("presidio-analyzer").setLevel(logging.ERROR)
-    provider = NlpEngineProvider(
-        nlp_configuration={
-            "nlp_engine_name": "spacy",
-            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-        }
-    )
-    analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
-    anonymizer = AnonymizerEngine()
+    try:
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+            }
+        )
+        analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
+        anonymizer = AnonymizerEngine()
+    except Exception as e:  # e.g. the en_core_web_sm model is not installed
+        # PII redaction is defense in depth; a missing NLP model must not take
+        # the whole investigation down. The pattern-based secret redaction in
+        # services/agent/untrusted.py does not depend on it.
+        print(f"[guardrails:warn] Presidio unavailable ({type(e).__name__}: {str(e)[:80]}) -- NER-based PII redaction disabled")
+        return (None, None)
     _presidio_engines = (analyzer, anonymizer)
     return _presidio_engines
 

@@ -1,0 +1,14 @@
+{
+  "key": "bdf6d106bffaa4df21597b642bd54f28",
+  "recorded_at": "2026-10-03T22:16:34",
+  "prompt_preview": "Incident alert: ALERT checkout-service: p99 latency 4x baseline and error rate above 5% for the last 10 minutes.\n\nTool reference -- what each one actually returns:\n- get_metrics: per-service metric ti",
+  "response": {
+    "text": "{\"tool\":\"get_metrics\",\"role\":\"required\",\"params\":{\"service\":\"checkout-service\",\"since\":\"2026-10-03 21:00:00\"},\"reasoning\":\"Deploy history is empty; logs show a connection pool exhaustion error which likely explains latency and error spikes. Need metric series (e.g., connection pool usage, DB latency, traffic) to confirm the resource saturation causing the incident.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 1245,
+    "output_tokens": 290,
+    "latency_ms": 15529,
+    "finish_reason": "stop"
+  }
+}

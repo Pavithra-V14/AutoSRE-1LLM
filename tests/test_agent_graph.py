@@ -40,7 +40,7 @@ def isolate(monkeypatch):
     """No Supabase, no Presidio, no real executor; records trace writes."""
     traces: list[dict[str, Any]] = []
     monkeypatch.setattr(g, "insert_trace_step", lambda **kw: traces.append(kw))
-    monkeypatch.setattr(g, "redact_pii", lambda text: text)
+    monkeypatch.setattr(g, "redact_pii", lambda text, entities=None: text)
     monkeypatch.setattr("services.agent.untrusted.redact_pii", lambda text, entities=None: text)
     monkeypatch.setattr(g, "post_notification", lambda **kw: None)
     monkeypatch.setattr(g, "post_approval_request", lambda **kw: None)

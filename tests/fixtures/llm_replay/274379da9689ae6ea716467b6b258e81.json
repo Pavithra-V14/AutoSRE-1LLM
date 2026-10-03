@@ -1,0 +1,14 @@
+{
+  "key": "274379da9689ae6ea716467b6b258e81",
+  "recorded_at": "2026-10-03T22:19:07",
+  "prompt_preview": "Incident alert: ALERT checkout-service: p99 latency at 5s and error rate above 50% for the last 7 minutes.\n\nTool reference -- what each one actually returns:\n- get_metrics: per-service metric time ser",
+  "response": {
+    "text": "{\"tool\":\"get_deploy_history\",\"role\":\"required\",\"params\":{\"service\":\"checkout-service\",\"since\":\"2026-10-03 21:00:00\"},\"reasoning\":\"Logs indicate external payment-gateway issues, but recent deploys could also cause latency/error spikes. Need recent deploy history for checkout-service to confirm or rule out internal changes as root cause.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 1244,
+    "output_tokens": 376,
+    "latency_ms": 12729,
+    "finish_reason": "stop"
+  }
+}

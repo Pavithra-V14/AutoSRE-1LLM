@@ -1,0 +1,14 @@
+{
+  "key": "27ada85745e51115f9168d1ea899b00d",
+  "recorded_at": "2026-10-03T22:15:07",
+  "prompt_preview": "Incident alert: ALERT inventory-service: error rate above 30% for the last 5 minutes.\n\nTool reference -- what each one actually returns:\n- get_metrics: per-service metric time series -- latency and er",
+  "response": {
+    "text": "{\"tool\":\"get_deploy_history\",\"role\":\"required\",\"params\":{\"service\":\"inventory-service\",\"since\":\"2026-10-03 21:00:00\"},\"reasoning\":\"We have a fatal NullPointerException in logs and a sharp error rate increase. To determine if a recent deploy introduced the bug, we need the recent deploy history for inventory-service around the time of the incident.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 1164,
+    "output_tokens": 449,
+    "latency_ms": 12418,
+    "finish_reason": "stop"
+  }
+}

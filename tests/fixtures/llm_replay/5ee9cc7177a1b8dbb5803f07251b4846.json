@@ -1,0 +1,14 @@
+{
+  "key": "5ee9cc7177a1b8dbb5803f07251b4846",
+  "recorded_at": "2026-10-03T22:15:43",
+  "prompt_preview": "Incident alert: ALERT auth-service: p99 latency briefly exceeded its threshold.\n\nTool reference -- what each one actually returns:\n- get_metrics: per-service metric time series -- latency and error ra",
+  "response": {
+    "text": "{\"tool\":\"get_logs\",\"role\":\"required\",\"params\":{\"service\":\"auth-service\",\"since\":\"2026-10-03 22:00:00\"},\"reasoning\":\"Metrics show a brief latency and error-rate spike with no recent deploys. Logs are empty from the default query; fetching logs around the spike time may reveal underlying errors or incidents causing the transient degradation.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 1051,
+    "output_tokens": 297,
+    "latency_ms": 3457,
+    "finish_reason": "stop"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "key": "f36d04733fb602c0bcef736b4b589348",
+  "recorded_at": "2026-10-03T22:14:37",
+  "prompt_preview": "Incident alert: ALERT checkout-service: p99 latency 4x baseline and error rate above 5% for the last 10 minutes.\n\nTool reference -- what each one actually returns:\n- get_metrics: per-service metric ti",
+  "response": {
+    "text": "{\"tool\":\"get_metrics\",\"role\":\"required\",\"params\":{\"service\":\"checkout-service\",\"since\":\"2026-10-03 20:00:00\"},\"reasoning\":\"We have logs indicating connection pool exhaustion and observed latency/error spikes. To confirm the timing and magnitude of these spikes for checkout-service, we need the service-specific latency and error rate metrics.\"}",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "input_tokens": 1257,
+    "output_tokens": 582,
+    "latency_ms": 1894,
+    "finish_reason": "stop"
+  }
+}

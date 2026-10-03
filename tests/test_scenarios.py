@@ -5,6 +5,7 @@ should trust."""
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -50,7 +51,7 @@ def test_alert_contains_no_cause_vocabulary(key):
 
 
 def test_scenario_count_is_documented_correctly():
-    readme = open("README.md", encoding="utf-8").read()
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
     assert f"Runs the {len(SCENARIOS)} scripted incidents" in readme
 
 

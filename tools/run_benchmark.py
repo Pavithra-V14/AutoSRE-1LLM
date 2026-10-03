@@ -1,56 +1,32 @@
 from __future__ import annotations
 
 import argparse
-import re
+import os
 import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from services.agent.benchmark_stats import status_counts, summarize_scenarios, wilson_interval
 from services.agent.evaluation import RunEvaluation, aggregate_metrics, evaluate_run
 from services.agent.graph import run_incident, ScenarioInjectionError
+from services.agent.judge import CausalGraphJudge
 from services.agent.persistence import compute_equivalent_cost_usd, insert_benchmark_run
+from services.agent.scoring import score_against_ground_truth, score_run  # noqa: F401 (score_against_ground_truth re-exported for callers of the old scorer)
 from services.agent.trust import compute_pattern_key, record_benchmark_outcome
 from services.simulator.scenarios import SCENARIOS
-
-SUCCESS_THRESHOLD = 0.5  
-
-
-def _extract_nodes(ground_truth: str) -> list[str]:
-    """'deploy:cfg-4471 -> pool_size=10 -> connection_exhaustion -> latency_spike'
-    -> ['deploy', 'cfg', '4471', 'pool', 'size', '10', 'connection',
-        'exhaustion', 'latency', 'spike']"""
-    raw_nodes = [n.strip() for n in ground_truth.split("->")]
-    words: list[str] = []
-    for node in raw_nodes:
-        words.extend(w.lower() for w in re.split(r"[^a-zA-Z0-9]+", node) if len(w) > 2)
-    return words
-
-
-def _graph_text(causal_graph: dict[str, Any]) -> str:
-    parts = []
-    for edge in causal_graph.get("edges", []):
-        parts.append(str(edge.get("from", "")))
-        parts.append(str(edge.get("to", "")))
-        parts.append(str(edge.get("id", "")))
-    return " ".join(parts).lower()
-
-
-def score_against_ground_truth(causal_graph: dict[str, Any], ground_truth: str) -> tuple[bool, float]:
-    nodes = _extract_nodes(ground_truth)
-    if not nodes:
-        return False, 0.0
-    graph_text = _graph_text(causal_graph)
-    matched = sum(1 for n in nodes if n in graph_text)
-    match_ratio = matched / len(nodes)
-    return match_ratio >= SUCCESS_THRESHOLD, round(match_ratio, 3)
-
-
-def run_one_scenario(scenario_key: str, scenario: dict[str, Any]) -> dict[str, Any]:
-    alert_text = f"Incident detected: {scenario['description']}"
+import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
+def run_one_scenario(
+    scenario_key: str, scenario: dict[str, Any], judge: Optional[CausalGraphJudge]
+) -> dict[str, Any]:
+    # Symptom-only alert. scenario["description"] states the cause and must
+    # never be shown to the agent (see ALERTS in scenarios.py).
+    alert_text = scenario["alert"]
     start = time.time()
     expected_tools = scenario.get("expected_tools", [])
 
@@ -62,6 +38,9 @@ def run_one_scenario(scenario_key: str, scenario: dict[str, Any]) -> dict[str, A
             "scenario": scenario_key,
             "success": False,
             "match_ratio": 0.0,
+            "score_method": "aborted",
+            "score_rationale": f"simulator unreachable: {e}",
+            "judge_cost_usd": 0.0,
             "cost_usd": 0.0,
             "steps_taken": 0,
             "wall_clock_s": round(time.time() - start, 2),
@@ -74,6 +53,9 @@ def run_one_scenario(scenario_key: str, scenario: dict[str, Any]) -> dict[str, A
             "scenario": scenario_key,
             "success": False,
             "match_ratio": 0.0,
+            "score_method": "aborted",
+            "score_rationale": f"agent run failed: {e}",
+            "judge_cost_usd": 0.0,
             "cost_usd": 0.0,
             "steps_taken": 0,
             "wall_clock_s": round(time.time() - start, 2),
@@ -82,10 +64,10 @@ def run_one_scenario(scenario_key: str, scenario: dict[str, Any]) -> dict[str, A
         }
 
     causal_graph = result.get("causal_graph") or {"edges": []}
-    success, match_ratio = score_against_ground_truth(causal_graph, scenario["ground_truth_cause"])
+    score = score_run(scenario, result, judge=judge)
 
     pattern_key = compute_pattern_key(causal_graph)
-    record_benchmark_outcome(pattern_key, result.get("incident_id", ""), success)
+    record_benchmark_outcome(pattern_key, result.get("incident_id", ""), score.success)
 
     total_cost = 0.0
     for step in result.get("steps_taken", []):
@@ -102,8 +84,11 @@ def run_one_scenario(scenario_key: str, scenario: dict[str, Any]) -> dict[str, A
 
     return {
         "scenario": scenario_key,
-        "success": success,
-        "match_ratio": match_ratio,
+        "success": score.success,
+        "match_ratio": score.score,
+        "score_method": score.method,
+        "score_rationale": score.rationale,
+        "judge_cost_usd": round(score.judge_cost_usd, 6),
         "cost_usd": total_cost,
         "steps_taken": len(result.get("steps_taken", [])),
         "wall_clock_s": round(time.time() - start, 2),
@@ -120,7 +105,17 @@ def main() -> None:
     parser.add_argument("--scenario", default=None, help="run a single scenario by key")
     parser.add_argument("--min-success-rate", type=float, default=None,
                          help="exit 1 if success rate falls below this (for CI)")
+    parser.add_argument("--runs", type=int, default=int(os.getenv("BENCHMARK_RUNS", "1")),
+                         help="run each scenario N times and report per-scenario pass rate, a 95%% "
+                              "confidence interval and which scenarios are flaky (default 1; the "
+                              "--min-success-rate gate then applies to the pass rate over ALL runs)")
+    parser.add_argument("--no-judge", action="store_true",
+                         help="grade with the legacy word-overlap scorer instead of the LLM judge "
+                              "(offline / no extra LLM calls; negative scenarios are still scored on their flags)")
     args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be at least 1")
+    judge = None if args.no_judge else CausalGraphJudge()
 
     scenarios = (
         {args.scenario: SCENARIOS[args.scenario]}
@@ -130,19 +125,23 @@ def main() -> None:
 
     run_id = str(uuid.uuid4())
     results = []
-    print(f"Running benchmark ({len(scenarios)} scenario(s))...\n")
+    repeat = f" x {args.runs} runs" if args.runs > 1 else ""
+    print(f"Running benchmark ({len(scenarios)} scenario(s){repeat})...\n")
 
-    for key, scenario in scenarios.items():
-        r = run_one_scenario(key, scenario)
+    schedule = [(key, scenario, i) for key, scenario in scenarios.items() for i in range(1, args.runs + 1)]
+    for key, scenario, run_number in schedule:
+        r = run_one_scenario(key, scenario, judge)
         results.append(r)
 
         status = "PASS" if r["success"] else "FAIL"
         error_note = f"  [{r['error']}]" if r["error"] else ""
+        label = f"{key} #{run_number}/{args.runs}" if args.runs > 1 else key
         print(
-            f"  [{status}] {key:30s} match={r['match_ratio']:.2f} "
+            f"  [{status}] {label:34s} score={r['match_ratio']:.2f} via={r['score_method']:<16s}"
             f"steps={r['steps_taken']:2d} cost=${r['cost_usd']:.6f} "
             f"({r['wall_clock_s']}s){error_note}"
         )
+        print(f"         -> {r['score_rationale'][:200]}")
 
         insert_benchmark_run(
             run_id=run_id,
@@ -171,7 +170,8 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("EVALUATION METRICS")
     print("=" * 60)
-    print(f"1. Agent success rate:          {n_success}/{n} ({success_rate:.1%})")
+    low, high = wilson_interval(n_success, n)
+    print(f"1. Agent success rate:          {n_success}/{n} ({success_rate:.1%}, 95% CI {low:.0%}-{high:.0%})")
     print(
         f"2. Tool selection accuracy:     F1={metrics['tool_selection_accuracy_f1']:.1%}  "
         f"(recall={metrics['tool_selection_accuracy_recall']:.1%} -- did runs call the tools "
@@ -194,6 +194,33 @@ def main() -> None:
     )
     print(f"5. Cost per task completion:    {completion_cost_str}")
     print("=" * 60)
+
+    if args.runs > 1:
+        stats = summarize_scenarios(results)
+        print("\nPer-scenario stability (" + f"{args.runs} runs each):")
+        for item in sorted(stats, key=lambda x: (x.pass_rate, x.scenario)):
+            print(f"  {item.passes}/{item.runs}  {item.status:<12s} mean_score={item.mean_score:.2f}  {item.scenario}")
+        counts = status_counts(stats)
+        print("Stability: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        if counts.get("flaky"):
+            print(
+                f"NOTE: {counts['flaky']} scenario(s) are flaky -- single-run results for them are noise. "
+                "Compare pass rates, not individual PASS/FAIL lines."
+            )
+
+    by_method: dict[str, int] = {}
+    for r in results:
+        by_method[r["score_method"]] = by_method.get(r["score_method"], 0) + 1
+    print("\nScored via: " + ", ".join(f"{m}={c}" for m, c in sorted(by_method.items())))
+    if by_method.get("lexical_fallback"):
+        print(
+            f"WARNING: the LLM judge was unavailable for {by_method['lexical_fallback']} scenario(s); "
+            "those used the word-overlap fallback and are less reliable -- re-run when the judge is reachable."
+        )
+    judge_cost = sum(r["judge_cost_usd"] for r in results)
+    if judge_cost:
+        print(f"Judge cost (equivalent paid rate, NOT included in CPSO below): ${judge_cost:.6f}")
+
     print(f"\nMean cost/incident (equivalent paid rate): ${mean_cost:.6f}")
     print(f"CPSO (Cost Per Successful Outcome):        ${cpso:.6f}" if cpso != float("inf")
           else "CPSO: undefined (0 successes)")

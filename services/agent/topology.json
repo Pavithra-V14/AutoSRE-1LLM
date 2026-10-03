@@ -1,0 +1,14 @@
+{
+  "_comment": "Service catalog: who depends on whom. Context for the investigator, NOT evidence -- it explains which services can cascade into which. Override the path with TOPOLOGY_PATH.",
+  "services": {
+    "checkout-service": {"depends_on": ["payment-gateway", "pricing-client", "order-service"]},
+    "pricing-client": {"depends_on": ["pricing-api"]},
+    "order-service": {"depends_on": ["inventory-service", "orders-db"]},
+    "inventory-service": {"depends_on": []},
+    "product-catalog-service": {"depends_on": ["product-db"]},
+    "recommendation-service": {"depends_on": ["product-catalog-service"]},
+    "search-service": {"depends_on": ["search-index"]},
+    "auth-service": {"depends_on": []}
+  },
+  "external": ["payment-gateway", "pricing-api"]
+}

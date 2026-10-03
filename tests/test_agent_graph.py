@@ -262,7 +262,7 @@ def test_prompt_numbers_steps_so_citations_can_be_real(monkeypatch):
     monkeypatch.setattr(g, "router", router)
     g.synthesize_step(_state(_baseline()))
     prompt = router.calls[0]["prompt"]
-    assert '"step": 1' in prompt
+    assert '"step":1' in prompt
     assert "Confidence calibration" in prompt
 
 
@@ -463,3 +463,56 @@ def test_executor_budget_is_configurable(monkeypatch):
     monkeypatch.setenv("MAX_TOOL_CALLS_PER_INCIDENT", "3")
     assert ToolExecutor().max_calls_per_incident == 3
     assert ToolExecutor(max_calls_per_incident=5).max_calls_per_incident == 5
+
+
+# --- context engineering in the prompts ------------------------------------------------------------------------------
+
+def _rich_baseline():
+    return [
+        plan("get_deploy_history"),
+        {"type": "observation", "content": {"tool": "get_deploy_history", "role": "required", "status": "ok", "disclosure": None,
+                                            "data": {"deploys": [{"id": "cfg-4471", "ts": "2026-10-03 16:00:00",
+                                                                  "service": "checkout-service", "change": "pool 50 -> 10"}]}}},
+        plan("get_metrics"),
+        {"type": "observation", "content": {"tool": "get_metrics", "role": "required", "status": "ok", "disclosure": None,
+                                            "data": {"checkout-service": {"p99_latency_ms": [120, 130, 125, 480, 510, 495]}}}},
+        plan("get_logs", role="preferred"),
+        {"type": "observation", "content": {"tool": "get_logs", "role": "preferred", "status": "ok", "disclosure": None,
+                                            "data": {"logs": [{"ts": "2026-10-03 16:04:00", "level": "ERROR", "message": "pool exhausted"}]}}},
+    ]
+
+
+def test_planner_is_given_time_topology_and_derived_signals(monkeypatch):
+    router = FakeRouter([llm('{"action": "conclude", "reasoning": "x"}')])
+    monkeypatch.setattr(g, "router", router)
+    state = _state(_rich_baseline())
+    state["alert_text"] = "ALERT checkout-service: p99 latency 4x baseline"
+    g.plan_step(state)
+
+    prompt = router.calls[0]["prompt"]
+    assert "Current time:" in prompt
+    assert "checkout-service: depends on [payment-gateway (external)" in prompt
+    assert "Derived signals" in prompt and "rises at point 4 of 6" in prompt
+    assert "first ERROR log 4 min after it" in prompt
+
+
+def test_synthesis_is_given_the_same_context_and_a_compact_trace(monkeypatch):
+    router = FakeRouter([llm(GOOD_GRAPH % ("1", "0.9"))])
+    monkeypatch.setattr(g, "router", router)
+    state = _state(_rich_baseline())
+    state["alert_text"] = "ALERT checkout-service: p99 latency 4x baseline"
+    g.synthesize_step(state)
+
+    prompt = router.calls[0]["prompt"]
+    assert "Derived signals" in prompt and "Service dependencies" in prompt
+    assert '"step":3' in prompt and "\n    " not in prompt.split("<untrusted_tool_output>")[1].split("</untrusted_tool_output>")[0]
+
+
+def test_weakly_supported_edge_is_flagged_but_kept(monkeypatch):
+    unsupported = ('{"edges": [{"id": "e1", "from": "dependency:payment_gateway", "to": "mechanism:upstream_timeout", '
+                   '"evidence_tool_call_id": "1"}], "confidence": 0.9, "confidence_rationale": "r"}')
+    monkeypatch.setattr(g, "router", FakeRouter([llm(unsupported)]))
+    graph = g.synthesize_step(_state(_rich_baseline()))["causal_graph"]
+
+    assert graph["weak_citations"] == ["e1"]
+    assert len(graph["edges"]) == 1  # flagged for a human, never discarded
